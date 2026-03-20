@@ -1,0 +1,22 @@
+# OpenAI API for GPT-4o
+openai>=1.0.0
+
+# HuggingFace datasets
+datasets
+huggingface_hub
+
+# Data processing
+pandas
+numpy
+
+# Evaluation metrics
+scikit-learn
+
+# Progress bars
+tqdm
+
+# Environment variables
+python-dotenv
+
+# (Optional) For local testing
+pytest

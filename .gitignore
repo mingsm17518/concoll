@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment Variables (contains API keys)
+.env
+
+# Data Files
+PrimeVul_v0.1/
+*.zip
+*.jsonl
+*.jsonl.gz
+
+# Results and Checkpoints
+results/
+checkpoints/
+
+# Logs
+*.log
+*.out
+*.err
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# UV
+.uv/
+uv.lock
+*.pdf
+
+# Memory Files
+MEMORY.md
+*_MEMORY.md
