@@ -31,13 +31,13 @@ ConColl 通过基于置信度的顺序决策，动态选择三种检测策略：
 | **模拟模式** | ✓ | GLM 小样本测试 |
 | **GPT 切换** | ✓ | 统一客户端，一键切换 |
 
-### ⚠️ 模型支持
+### 模型支持
 
-| 特性 | GLM-4.7 | GPT-4 |
-|------|---------|-------|
+| 特性 | GLM/MiniMax | GPT-4 |
+|------|-------------|-------|
 | **logprobs 支持** | ✗ | ✓ |
-| **置信度计算** | 模拟模式 | 真实计算 |
-| **三阶段分流** | --simulate | 自动 |
+| **置信度计算** | 低置信度 0.15（自动进入 Stage 2/3） | 真实计算 |
+| **三阶段分流** | ✓ 自动 | ✓ 自动 |
 
 ## 快速开始
 
@@ -45,8 +45,14 @@ ConColl 通过基于置信度的顺序决策，动态选择三种检测策略：
 cd /data/lx/concoll
 source .venv/bin/activate
 
-# GLM 小样本测试 (模拟模式)
-python run_concoll.py --max-samples 20 --simulate
+# 使用真实 PrimeVul 数据集测试（推荐）
+python run_concoll.py --max-samples 20
+
+# 使用合成测试数据
+python run_concoll.py --test-data
+
+# 模拟模式（固定比例分流）
+python run_concoll.py --test-data --simulate
 ```
 
 ## 切换到 GPT-4
@@ -73,12 +79,12 @@ MODEL=gpt-4
 
 ### 模型对比
 
-| 特性 | GLM + 模拟模式 | GLM 正常模式 | GPT-4 |
-|------|---------------|-------------|-------|
-| logprobs | ✗ | ✗ | ✓ |
-| 置信度来源 | 固定比例随机 | 占位值 0.0 | 真实计算 |
-| 三阶段分流 | ✓ | ✗ | ✓ |
-| 适用场景 | 小样本测试 | - | 生产使用 |
+| 特性 | GLM/MiniMax | GPT-4 |
+|------|-------------|-------|
+| logprobs | ✗ | ✓ |
+| 置信度来源 | 低置信度 0.15 | 真实计算 |
+| 三阶段分流 | ✓ 自动 | ✓ 自动 |
+| 适用场景 | 测试/开发 | 生产使用 |
 
 ### 置信度计算原理
 
@@ -90,10 +96,22 @@ logprobs = [
 ]
 # 置信度 = 0.90 - 0.10 = 0.80
 
-# GLM 模拟模式 (模拟)
-Stage 1: 置信度 0.4~0.6 → 接受
-Stage 2: 置信度 0.15~0.25 → RAG
-Stage 3: 置信度 0.0~0.1 → Multi-Agent
+# GLM/MiniMax (无 logprobs)
+# 使用低置信度 0.15，确保样本自动进入 Stage 2/3 进行更详细分析
+# Stage 1: 置信度 < 0.3 → 进入 Stage 2
+# Stage 2: 置信度 < 0.3 → 进入 Stage 3 (多智能体)
+```
+
+### MiniMax/GLM 测试流程
+
+```bash
+# 1. 使用合成数据快速测试（推荐先运行）
+python run_concoll.py --test-data
+
+# 2. 使用模拟模式测试分阶段逻辑
+python run_concoll.py --test-data --simulate
+
+# 3. 确认流程正确后，切换到 GPT-4 进行生产测试
 ```
 
 ## 项目结构
@@ -171,11 +189,13 @@ Options:
   --confidence-threshold     Stage 1 置信度阈值 (默认 0.3)
   --output-dir DIR            结果输出目录
   --force-stages              强制所有样本通过所有阶段
-  --simulate                  启用模拟模式 (GLM 测试用)
+  --simulate                  启用模拟模式 (固定比例分流)
   --stage1-ratio              Stage 1 比例 (默认 0.7)
   --stage2-ratio              Stage 2 比例 (默认 0.25)
   --stage3-ratio              Stage 3 比例 (默认 0.05)
 ```
+
+**注意**: Stage 3 (多智能体协作) 默认启用。如需禁用，可以修改 `run_concoll.py` 中 `ConCollFramework` 的 `use_stage3` 参数。
 
 ## 使用示例
 

@@ -103,7 +103,12 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
             ]
 
             response, usage = self.client.chat_completion(messages)
-            total_usage += usage
+            # Handle both simple usage and nested (usage, logprobs_info) tuple
+            if isinstance(usage, tuple):
+                actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
+            else:
+                actual_usage = usage
+            total_usage += actual_usage
 
             # Parse response
             response_lower = response.strip().lower()
@@ -173,7 +178,12 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
             vote, agent_votes, usage = self.predict(code)
 
             predictions[idx] = vote
-            total_usage += usage
+            # Handle both simple usage and nested (usage, logprobs_info) tuple
+            if isinstance(usage, tuple):
+                actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
+            else:
+                actual_usage = usage
+            total_usage += actual_usage
 
             for agent, agent_vote in agent_votes.items():
                 all_agent_votes[agent][idx] = agent_vote

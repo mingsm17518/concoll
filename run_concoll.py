@@ -46,6 +46,7 @@ class ConCollFramework:
         rag_examples: int = 50,
         verbose: bool = True,
         force_stages: bool = False,
+        use_stage3: bool = True,  # Enable Stage 3 by default
         simulate_mode: bool = False,
         simulate_ratios: dict = None
     ):
@@ -66,6 +67,7 @@ class ConCollFramework:
         self.rag_examples = rag_examples
         self.verbose = verbose
         self.force_stages = force_stages
+        self.use_stage3 = use_stage3  # Whether to use Stage 3
         self.simulate_mode = simulate_mode
         self.simulate_ratios = simulate_ratios or {"stage1": 0.7, "stage2": 0.25, "stage3": 0.05}
 
@@ -191,9 +193,18 @@ class ConCollFramework:
                 codes, labels, deferred_indices
             )
 
-            for idx in deferred_indices:
-                predictions[idx] = stage2_preds[idx]
-                stage_stats["stage2_used"] += 1
+            # If using Stage 3, don't finalize predictions yet - pass to Stage 3
+            # Otherwise, use Stage 2 predictions as final
+            if self.use_stage3 and self.stage3 is not None:
+                # Stage 2 predictions become inputs for Stage 3
+                for idx in deferred_indices:
+                    stage_stats["stage2_used"] += 1
+                stage2_final_preds = stage2_preds
+            else:
+                # Use Stage 2 predictions as final
+                for idx in deferred_indices:
+                    predictions[idx] = stage2_preds[idx]
+                    stage_stats["stage2_used"] += 1
 
             total_usage += type('Usage', (), {
                 'prompt_tokens': stage2_usage.prompt_tokens,
@@ -206,9 +217,31 @@ class ConCollFramework:
             if self.verbose:
                 print(f"Stage 2 processed: {stage_stats['stage2_used']} samples")
 
-        # Note: For this implementation, Stage 2 gives final predictions
-        # Stage 3 (multi-agent) can be added for cases where Stage 2 is still uncertain
-        # This can be extended with another confidence threshold
+        # Stage 3: Multi-Agent Collaboration
+        # Run Stage 3 for all samples that came from Stage 2
+        if self.use_stage3 and self.stage3 is not None and deferred_indices:
+            if self.verbose:
+                print(f"\nStage 3: Multi-Agent Collaboration")
+
+            stage3_preds, stage3_votes, stage3_usage = self.stage3.predict_batch(
+                codes, deferred_indices
+            )
+            for idx in deferred_indices:
+                predictions[idx] = stage3_preds[idx]
+                stage_stats["stage3_used"] += 1
+
+            # Handle usage
+            if hasattr(stage3_usage, 'prompt_tokens'):
+                total_usage.prompt_tokens += stage3_usage.prompt_tokens
+                total_usage.completion_tokens += stage3_usage.completion_tokens
+                total_usage.total_tokens += stage3_usage.total_tokens
+                total_usage.api_calls += stage3_usage.api_calls
+            else:
+                total_usage.api_calls += len(deferred_indices) * len(self.stage3.agents)
+
+            stage_stats["stage3_cost"] = getattr(stage3_usage, 'total_tokens', 0)
+            if self.verbose:
+                print(f"Stage 3 processed: {stage_stats['stage3_used']} samples")
 
         if self.verbose:
             print(f"\n{'='*60}")
@@ -216,7 +249,7 @@ class ConCollFramework:
             print(f"{'='*60}")
             print(f"Stage 1 (Direct): {stage_stats['stage1_accepted']} samples")
             print(f"Stage 2 (RAG): {stage_stats['stage2_used']} samples")
-            print(f"Stage 3 (Multi-Agent): 0 samples (not used in this run)")
+            print(f"Stage 3 (Multi-Agent): {stage_stats['stage3_used']} samples")
             print(f"\nTotal Tokens: {total_usage.total_tokens:,}")
             print(f"API Calls: {total_usage.api_calls}")
             print(f"{'='*60}\n")
@@ -301,6 +334,7 @@ def run_experiment(config: Config, use_test_data: bool = False,
         rag_examples=min(50, len(train_samples)),
         verbose=True,
         force_stages=force_stages,
+        use_stage3=True,  # Enable Stage 3 by default for full pipeline
         simulate_mode=simulate_mode,
         simulate_ratios=simulate_ratios
     )

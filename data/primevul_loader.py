@@ -225,14 +225,15 @@ def create_test_samples() -> List[VulnerabilitySample]:
         ),
         VulnerabilitySample(
             idx=1,
-            func_before="""int calculate(int a, int b) {
-    return a + b;
+            func_before="""int divide(int a, int b) {
+    return a / b;
 }""",
-            func_after="""int calculate(int a, int b) {
-    return a + b;
+            func_after="""int divide(int a, int b) {
+    if (b == 0) return 0;
+    return a / b;
 }""",
-            cwe="None",
-            label=0,
+            cwe="CWE-369",
+            label=1,
             commit_id="test2",
             repo="test"
         ),

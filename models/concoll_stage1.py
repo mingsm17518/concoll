@@ -211,13 +211,21 @@ Respond with only 'VULNERABLE' or 'SAFE'."""
         # Handle different usage_info formats
         if isinstance(usage_info, tuple):
             usage, logprobs_info = usage_info
-            confidence_score = logprobs_info.get("confidence", 0.5)
-            top_probability = logprobs_info.get("top_prob", 0.5)
-            second_probability = logprobs_info.get("second_prob", 0.0)
+            # Check if logprobs are actually available (not just placeholder)
+            if logprobs_info.get("has_logprobs", False):
+                confidence_score = logprobs_info.get("confidence", 0.5)
+                top_probability = logprobs_info.get("top_prob", 0.5)
+                second_probability = logprobs_info.get("second_prob", 0.0)
+            else:
+                # For models without logprobs (GLM/MiniMax), use low default confidence
+                # so samples can proceed to Stage 2/3 for more thorough analysis
+                confidence_score = 0.15  # Low confidence - will go to Stage 2
+                top_probability = 0.5
+                second_probability = 0.35
         else:
-            confidence_score = 0.5
+            confidence_score = 0.15  # Low confidence for non-logprobs models
             top_probability = 0.5
-            second_probability = 0.0
+            second_probability = 0.35
             usage = usage_info
 
         return PredictionResult(
@@ -253,9 +261,24 @@ Respond with only 'VULNERABLE' or 'SAFE'."""
             List of stage assignments ("stage1", "stage2", "stage3")
         """
         ratios = self.simulate_ratios
+
+        # Use cumulative distribution for more accurate allocation
+        # First assign floor values, then distribute remainders
         n_stage1 = int(n_samples * ratios["stage1"])
         n_stage2 = int(n_samples * ratios["stage2"])
-        n_stage3 = n_samples - n_stage1 - n_stage2  # Remaining go to stage3
+        n_stage3 = n_samples - n_stage1 - n_stage2
+
+        # Adjust if we have negative or too few due to rounding
+        if n_stage3 < 0:
+            # Adjust from stage1 if stage3 went negative
+            n_stage1 += n_stage3
+            n_stage3 = 0
+
+        # Ensure minimum 1 for stage3 if there's a remainder or if ratio > 0
+        total_assigned = n_stage1 + n_stage2 + n_stage3
+        if total_assigned < n_samples:
+            # Distribute remaining samples to stage3
+            n_stage3 += n_samples - total_assigned
 
         assignments = (["stage1"] * n_stage1 +
                       ["stage2"] * n_stage2 +

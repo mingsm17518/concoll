@@ -236,7 +236,12 @@ Example {i} ({label_str}, {ex.cwe}):
 
             prediction, usage = self.predict(code, label)
             predictions[idx] = prediction
-            total_usage += usage
+            # Handle both simple usage and nested (usage, logprobs_info) tuple
+            if isinstance(usage, tuple):
+                actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
+            else:
+                actual_usage = usage
+            total_usage += actual_usage
 
         if self.verbose:
             print(f"  Stage 2: Completed {len(indices)} samples")
