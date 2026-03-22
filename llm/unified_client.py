@@ -106,7 +106,6 @@ class UnifiedClient:
 
         if self.provider == "openai":
             # OpenAI: Full logprobs support
-            import openai
             response = self.client.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
