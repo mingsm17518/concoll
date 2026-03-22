@@ -114,7 +114,7 @@ Analyze C code for security vulnerabilities carefully."""
             # Anthropic doesn't provide logprobs by default
             # We'll estimate confidence from response certainty
             confidence_score = 0.5  # Default medium confidence
-            logprobs_info = {"confidence": confidence_score}
+            logprobs_info = {"confidence": confidence_score, "has_logprobs": False}
 
             return content, logprobs_info
 
@@ -157,10 +157,11 @@ Analyze C code for security vulnerabilities carefully."""
                     "confidence": confidence_score,
                     "top_token": top_token,
                     "top_prob": top_prob,
-                    "second_prob": second_prob
+                    "second_prob": second_prob,
+                    "has_logprobs": True
                 }
             else:
-                logprobs_info = {"confidence": 0.5}
+                logprobs_info = {"confidence": 0.5, "has_logprobs": False}
 
             usage = type('Usage', (), {
                 'prompt_tokens': response.usage.prompt_tokens,

@@ -25,7 +25,15 @@ class Config:
     anthropic_base_url: str = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
     # Model Configuration
-    model: str = os.getenv("ANTHROPIC_MODEL", "MiniMax-M2.1")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "MiniMax-M2.1")
+    openai_model: str = os.getenv("OPENAI_MODEL", os.getenv("MODEL", "gpt-4o"))
+
+    @property
+    def model(self) -> str:
+        """Get the appropriate model based on provider."""
+        if self.api_provider == "anthropic":
+            return self.anthropic_model
+        return self.openai_model
 
     # PrimeVul Dataset Configuration
     dataset_name: str = "ASSERT-KTH/PrimeVul"
