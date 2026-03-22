@@ -43,6 +43,7 @@ class ConCollFramework:
         self,
         client: Client,
         confidence_threshold: float = 0.3,
+        stage2_threshold: float = 0.2,
         rag_examples: int = 50,
         verbose: bool = True,
         force_stages: bool = False,
@@ -55,7 +56,8 @@ class ConCollFramework:
 
         Args:
             client: LLM client
-            confidence_threshold: Threshold for Stage 1 acceptance
+            confidence_threshold: Threshold for Stage 1 acceptance (th1)
+            stage2_threshold: Threshold for Stage 2 acceptance (th2)
             rag_examples: Number of examples for RAG retrieval
             verbose: Whether to print progress
             force_stages: If True, force all samples through all stages
@@ -64,6 +66,7 @@ class ConCollFramework:
         """
         self.client = client
         self.confidence_threshold = confidence_threshold
+        self.stage2_threshold = stage2_threshold
         self.rag_examples = rag_examples
         self.verbose = verbose
         self.force_stages = force_stages
@@ -99,7 +102,7 @@ class ConCollFramework:
         self.stage2 = RAGPredictor(
             client=self.client,
             retriever=retriever,
-            confidence_threshold=self.confidence_threshold,  # th2 = th1 for now
+            confidence_threshold=self.stage2_threshold,  # th2 (independent from th1)
             verbose=self.verbose
         )
 
@@ -145,7 +148,8 @@ class ConCollFramework:
             print("ConColl Sequential Framework")
             print(f"{'='*60}")
             print(f"Total samples: {total_samples}")
-            print(f"Confidence threshold: {self.confidence_threshold}")
+            print(f"Stage 1 threshold (th1): {self.confidence_threshold}")
+            print(f"Stage 2 threshold (th2): {self.stage2_threshold}")
             print(f"RAG examples: {self.rag_examples}")
             print(f"\nStarting sequential prediction...")
             print(f"{'='*60}\n")
@@ -169,6 +173,10 @@ class ConCollFramework:
             'api_calls': stage1_usage.api_calls
         })()
         stage_stats["stage1_cost"] = stage1_usage.total_tokens
+
+        # Save intermediate state for error recovery
+        self._last_predictions = predictions.copy()
+        self._last_stage_stats = stage_stats.copy()
 
         # Find samples that need Stage 2/3
         if self.force_stages:
@@ -223,6 +231,10 @@ class ConCollFramework:
             })()
             stage_stats["stage2_cost"] = stage2_usage.total_tokens
 
+            # Save intermediate state after Stage 2
+            self._last_predictions = predictions.copy()
+            self._last_stage_stats = stage_stats.copy()
+
         # Stage 3: Multi-Agent Collaboration
         # Run Stage 3 only for samples not accepted in Stage 2
         if self.use_stage3 and self.stage3 is not None and stage3_indices:
@@ -263,8 +275,50 @@ class ConCollFramework:
         return predictions, stage_stats
 
 
+def save_intermediate_result(config: Config, predictions: list, labels: list,
+                             stage_stats: dict, completed_stage: int):
+    """Save intermediate results when a stage completes or error occurs."""
+    import json
+
+    # Compute metrics for completed predictions
+    valid_preds = [p for p in predictions if p is not None]
+    valid_labels = [labels[i] for i, p in enumerate(predictions) if p is not None]
+
+    if len(valid_preds) == 0:
+        return
+
+    # Compute binary metrics
+    binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
+
+    result = {
+        "method": "concoll",
+        "num_samples": len(predictions),
+        "completed_stage": completed_stage,
+        "valid_samples": len(valid_preds),
+        "stage_stats": stage_stats,
+        "binary_metrics": {
+            "accuracy": float(binary_metrics.accuracy),
+            "precision": float(binary_metrics.precision),
+            "recall": float(binary_metrics.recall),
+            "f1": float(binary_metrics.f1),
+            "tp": int(binary_metrics.tp),
+            "fp": int(binary_metrics.fp),
+            "tn": int(binary_metrics.tn),
+            "fn": int(binary_metrics.fn)
+        },
+        "status": "interrupted" if completed_stage < 3 else "completed"
+    }
+
+    os.makedirs(config.results_dir, exist_ok=True)
+    result_path = os.path.join(config.results_dir, "concoll_results.json")
+    with open(result_path, 'w') as f:
+        json.dump(result, f, indent=2)
+    print(f"[Auto-saved] Intermediate result (Stage {completed_stage}): {result_path}")
+
+
 def run_experiment(config: Config, use_test_data: bool = False,
                    confidence_threshold: float = 0.3,
+                   stage2_threshold: float = 0.2,
                    force_stages: bool = False,
                    simulate_mode: bool = False,
                    simulate_ratios: dict = None):
@@ -337,6 +391,7 @@ def run_experiment(config: Config, use_test_data: bool = False,
     framework = ConCollFramework(
         client=client,
         confidence_threshold=confidence_threshold,
+        stage2_threshold=stage2_threshold,
         rag_examples=min(50, len(train_samples)),
         verbose=True,
         force_stages=force_stages,
@@ -348,8 +403,40 @@ def run_experiment(config: Config, use_test_data: bool = False,
     # Setup stages with training examples
     framework.setup_stages(train_samples)
 
-    # Run predictions
-    predictions, stage_stats = framework.predict_batch(codes, labels)
+    # Run predictions with error handling
+    try:
+        predictions, stage_stats = framework.predict_batch(codes, labels)
+    except Exception as e:
+        print(f"\n[ERROR] {type(e).__name__}: {e}")
+        print("[INFO] Saving intermediate results...")
+
+        # Get current state from framework
+        # predictions and stage_stats may be partially filled
+        # Use framework's internal state if available
+        if hasattr(framework, '_last_predictions'):
+            predictions = framework._last_predictions
+        if hasattr(framework, '_last_stage_stats'):
+            stage_stats = framework._last_stage_stats
+
+        # Try to compute metrics with available predictions
+        valid_indices = [i for i, p in enumerate(predictions) if p is not None]
+        valid_preds = [predictions[i] for i in valid_indices]
+        valid_labels = [labels[i] for i in valid_indices]
+
+        if len(valid_preds) > 0:
+            save_intermediate_result(config, predictions, labels,
+                                   stage_stats if 'stage_stats' in dir() else
+                                   {"stage1_accepted": 0, "stage2_used": 0, "stage3_used": 0,
+                                    "stage1_cost": 0, "stage2_cost": 0, "stage3_cost": 0},
+                                   3)  # Assume Stage 3 was running
+            binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
+            print(f"[INFO] Saved results for {len(valid_preds)}/{len(predictions)} samples")
+            print(f"[INFO] Accuracy so far: {binary_metrics.accuracy:.4f}")
+        else:
+            print("[WARNING] No valid predictions to save")
+
+        # Re-raise to halt execution
+        raise
 
     # Compute metrics
     binary_metrics = compute_binary_metrics(predictions, labels)
@@ -426,6 +513,8 @@ def main():
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--confidence-threshold", type=float, default=0.3,
                         help="Stage 1 confidence threshold (default: 0.3)")
+    parser.add_argument("--stage2-threshold", type=float, default=0.2,
+                        help="Stage 2 confidence threshold (default: 0.2)")
     parser.add_argument("--force-stages", action="store_true",
                         help="Force all samples through all three stages")
     parser.add_argument("--simulate", action="store_true",
@@ -463,6 +552,7 @@ def main():
         config,
         args.test_data,
         config.confidence_threshold,
+        args.stage2_threshold,
         args.force_stages,
         args.simulate,
         simulate_ratios

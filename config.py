@@ -43,7 +43,8 @@ class Config:
     num_candidates: int = 5  # N for Standard Dreaming
     max_samples: int = None  # None = use all samples, set to N for testing
     random_seed: int = 42
-    confidence_threshold: float = os.getenv("CONFIDENCE_THRESHOLD", 0.3)  # Stage 1 置信度阈值
+    confidence_threshold: float = os.getenv("CONFIDENCE_THRESHOLD", 0.3)  # Stage 1 置信度阈值 (th1)
+    stage2_threshold: float = os.getenv("STAGE2_THRESHOLD", 0.2)  # Stage 2 置信度阈值 (th2)
 
     # API Parameters
     temperature: float = 0.0  # Deterministic for vulnerability detection
