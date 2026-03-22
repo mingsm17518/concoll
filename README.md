@@ -33,11 +33,43 @@ ConColl 通过基于置信度的顺序决策，动态选择三种检测策略：
 
 ### 模型支持
 
-| 特性 | GLM/MiniMax | GPT-4 |
-|------|-------------|-------|
-| **logprobs 支持** | ✗ | ✓ |
-| **置信度计算** | 低置信度 0.15（自动进入 Stage 2/3） | 真实计算 |
-| **三阶段分流** | ✓ 自动 | ✓ 自动 |
+| 特性 | GLM/MiniMax | DeepSeek (OpenAI兼容) | GPT-4 |
+|------|-------------|----------------------|-------|
+| **logprobs 支持** | ✗ | ✓ | ✓ |
+| **置信度计算** | 低置信度 0.15 | 真实计算 | 真实计算 |
+| **三阶段分流** | ✓ 自动 | ✓ 自动 | ✓ 自动 |
+
+### 测试结果
+
+#### DeepSeek 测试 (2026-03-22)
+
+```bash
+uv run run_concoll.py --max-samples 10
+```
+
+**配置**: API Provider: openai, Model: deepseek-chat
+
+**结果**:
+```
+Stage 1 (Direct): 20 samples
+Stage 2 (RAG): 0 samples
+Stage 3 (Multi-Agent): 0 samples
+
+Accuracy:  0.5500
+Precision: 0.5263
+Recall:    1.0000
+F1 Score:  0.6897
+
+混淆矩阵:
+  TP=10 | FN=0
+  FP=9 | TN=1
+```
+
+**分析**:
+- DeepSeek 通过 OpenAI 兼容 API 返回 logprobs，置信度计算正常
+- 所有样本在 Stage 1 被接受（置信度 > 0.3），因为模型倾向于输出 "VULNERABLE"，首词概率极高
+- 召回率 100% 但精确率仅 52.63%，模型倾向于将所有样本预测为漏洞
+- 建议使用 GPT-4 获得更准确的漏洞检测
 
 ## 快速开始
 
