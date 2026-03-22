@@ -105,7 +105,7 @@ class ConCollFramework:
         # Stage 3: Multi-Agent Collaboration
         self.stage3 = MultiAgentCollaboration(
             client=self.client,
-            agents=["security_analyst", "code_reviewer", "attacker"],
+            agents=["security_analyst", "penetration_tester", "software_security_engineer"],
             voting_strategy="majority",
             verbose=self.verbose
         )
@@ -189,7 +189,7 @@ class ConCollFramework:
             if self.verbose:
                 print(f"\nStage 2: RAG with External Examples")
 
-            stage2_preds, stage2_usage = self.stage2.predict_batch(
+            stage2_preds, stage2_usage, stage2_examples = self.stage2.predict_batch(
                 codes, labels, deferred_indices
             )
 
@@ -224,7 +224,7 @@ class ConCollFramework:
                 print(f"\nStage 3: Multi-Agent Collaboration")
 
             stage3_preds, stage3_votes, stage3_usage = self.stage3.predict_batch(
-                codes, deferred_indices
+                codes, deferred_indices, stage2_examples
             )
             for idx in deferred_indices:
                 predictions[idx] = stage3_preds[idx]
@@ -432,9 +432,13 @@ def main():
                         help="Ratio of samples for Stage 3 in simulate mode (default: 0.05)")
     args = parser.parse_args()
 
+    # Create config first to get default values
+    default_config = Config()
+
     config = Config.from_args(
         max_samples=args.max_samples,
-        results_dir=args.output_dir
+        results_dir=args.output_dir,
+        confidence_threshold=args.confidence_threshold if args.confidence_threshold != 0.3 else default_config.confidence_threshold
     )
 
     # Build simulate ratios if simulate mode is enabled
@@ -452,7 +456,7 @@ def main():
     run_experiment(
         config,
         args.test_data,
-        args.confidence_threshold,
+        config.confidence_threshold,
         args.force_stages,
         args.simulate,
         simulate_ratios

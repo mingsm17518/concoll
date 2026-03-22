@@ -112,21 +112,7 @@ Key vulnerability indicators:
 
 IMPORTANT: Be balanced in your assessment. Use the examples as reference but make your own judgment."""
 
-    USER_PROMPT_TEMPLATE = """Analyze the following C code for security vulnerabilities.
-
-Similar examples for reference:
-{examples}
-
-Target code to analyze:
-```c
-{code}
-```
-
-Does the target code contain a security vulnerability?
-- Respond "Yes" if you identify a clear vulnerability
-- Respond "No" if the code appears secure
-
-Your answer:"""
+    USER_PROMPT_TEMPLATE = """Your task is to assess whether the provided code contains any security vulnerabilities. \n\n Here are some examples: \n\n {examples} \n\n Is the following code vulnerable? Respond with only 'Yes' or 'No'. \n\n {code}"""
 
     def __init__(
         self,
@@ -151,7 +137,7 @@ Your answer:"""
         self,
         code: str,
         true_label: Optional[int] = None
-    ) -> Tuple[int, object]:
+    ) -> Tuple[int, object, List["RAGExample"]]:
         """
         Make prediction with RAG context.
 
@@ -160,7 +146,7 @@ Your answer:"""
             true_label: Optional true label for better retrieval
 
         Returns:
-            Tuple of (prediction, token_usage)
+            Tuple of (prediction, token_usage, examples)
         """
         # Retrieve similar examples
         examples = self.retriever.retrieve(code, true_label)
@@ -187,7 +173,7 @@ Your answer:"""
         else:
             prediction = 0
 
-        return prediction, usage
+        return prediction, usage, examples
 
     def _format_examples(self, examples: List[RAGExample]) -> str:
         """Format examples into prompt text."""
@@ -209,7 +195,7 @@ Example {i} ({label_str}, {ex.cwe}):
         codes: List[str],
         labels: List[int],
         indices: List[int] = None
-    ) -> Tuple[List[int], object]:
+    ) -> Tuple[List[int], object, List[List["RAGExample"]]]:
         """
         Make predictions for a batch of codes.
 
@@ -219,12 +205,13 @@ Example {i} ({label_str}, {ex.cwe}):
             indices: Indices of codes to process (None = all)
 
         Returns:
-            Tuple of (predictions, total_usage)
+            Tuple of (predictions, total_usage, examples_list)
         """
         if indices is None:
             indices = range(len(codes))
 
         predictions = [None] * len(codes)
+        examples_list = [[] for _ in range(len(codes))]
         total_usage = TokenUsage()
 
         for i, idx in enumerate(indices):
@@ -234,8 +221,9 @@ Example {i} ({label_str}, {ex.cwe}):
             code = codes[idx]
             label = labels[idx] if idx < len(labels) else None
 
-            prediction, usage = self.predict(code, label)
+            prediction, usage, examples = self.predict(code, label)
             predictions[idx] = prediction
+            examples_list[idx] = examples
             # Handle both simple usage and nested (usage, logprobs_info) tuple
             if isinstance(usage, tuple):
                 actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
@@ -246,7 +234,7 @@ Example {i} ({label_str}, {ex.cwe}):
         if self.verbose:
             print(f"  Stage 2: Completed {len(indices)} samples")
 
-        return predictions, total_usage
+        return predictions, total_usage, examples_list
 
     def get_name(self) -> str:
         """Get method name."""

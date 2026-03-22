@@ -39,22 +39,7 @@ class DirectPredictor:
     SYSTEM_PROMPT = """You are a code vulnerability detection expert.
 Analyze C code for security vulnerabilities carefully."""
 
-    USER_PROMPT_TEMPLATE = """Analyze this C code for security vulnerabilities:
-
-```c
-{code}
-```
-
-First, identify the main function/purpose of this code.
-Then, check for common vulnerability patterns:
-- Buffer overflow (unchecked array access, unsafe string operations)
-- Null pointer dereference
-- Memory leaks
-- Integer overflow
-- Missing input validation
-
-Based on your analysis, is this code VULNERABLE or SAFE?
-Respond with only 'VULNERABLE' or 'SAFE'."""
+    USER_PROMPT_TEMPLATE = """Is the following code vulnerable? Respond with only 'Yes' or 'No'. \n\n {code}"""
 
     def __init__(
         self,
@@ -242,13 +227,25 @@ Respond with only 'VULNERABLE' or 'SAFE'."""
         """
         Decide whether to accept prediction based on confidence.
 
+        According to the paper: "If the score exceeds a predefined threshold (th1)
+        and the top-1 token is either 'Yes' or 'No', the prediction is accepted."
+
         Args:
             result: PredictionResult from predict()
 
         Returns:
-            True if confidence score exceeds threshold
+            True if confidence score exceeds threshold AND top-1 is Yes/No
         """
-        return result.confidence_score >= self.confidence_threshold
+        # Check threshold
+        if result.confidence_score < self.confidence_threshold:
+            return False
+
+        # Check if top-1 token is Yes or No (case-insensitive)
+        top_token_lower = result.top_token.lower() if result.top_token else ""
+        if top_token_lower in ["yes", "no"]:
+            return True
+
+        return False
 
     def _assign_stages(self, n_samples: int) -> List[str]:
         """

@@ -25,36 +25,18 @@ class MultiAgentCollaboration:
     AGENTS = {
         "security_analyst": {
             "name": "Security Analyst",
-            "system": """You are a Security Analyst specializing in vulnerability detection.
-Your role is to identify potential security issues in code from a defensive perspective.
-Focus on: buffer overflows, injection attacks, authentication issues, authorization flaws.""",
-            "prompt": """As a Security Analyst, analyze this code for vulnerabilities:
-```c
-{code}
-```
-Respond with 'Yes' if vulnerable, 'No' if safe."""
+            "system": """You are a Security Analyst and your task is to assess whether the provided code contains any security vulnerabilities.""",
+            "prompt": """You are a security analyst and your task is to assess whether the provided code contains any security vulnerabilities. \n\n Here are some examples: \n\n {examples} \n\n Is the following code vulnerable? Respond with only 'Yes' or 'No'. \n\n {code}"""
         },
-        "code_reviewer": {
-            "name": "Code Reviewer",
-            "system": """You are a Code Reviewer focused on code quality and best practices.
-Your role is to identify potential issues from a software engineering perspective.
-Focus on: null pointer dereferences, memory leaks, race conditions, error handling.""",
-            "prompt": """As a Code Reviewer, analyze this code for issues:
-```c
-{code}
-```
-Respond with 'Yes' if vulnerable, 'No' if safe."""
+        "penetration_tester": {
+            "name": "Penetration Tester",
+            "system": """You are a Penetration Tester and your task is to assess whether the provided code contains any security vulnerabilities.""",
+            "prompt": """You are a penetration tester and your task is to assess whether the provided code contains any security vulnerabilities. \n\n Here are some examples: \n\n {examples} \n\n Is the following code vulnerable? Respond with only 'Yes' or 'No'. \n\n {code}"""
         },
-        "attacker": {
-            "name": "Attacker",
-            "system": """You are simulating an Attacker mindset to find exploitable vulnerabilities.
-Your role is to think like a malicious actor trying to exploit the code.
-Focus on: input validation bypasses, privilege escalation, unauthorized access.""",
-            "prompt": """As an Attacker looking for exploits, analyze this code:
-```c
-{code}
-```
-Respond with 'Yes' if exploitable, 'No' if safe."""
+        "software_security_engineer": {
+            "name": "Software Security Engineer",
+            "system": """You are a Software Security Engineer and your task is to assess whether the provided code contains any security vulnerabilities.""",
+            "prompt": """You are a software security engineer and your task is to assess whether the provided code contains any security vulnerabilities. \n\n Here are some examples: \n\n {examples} \n\n Is the following code vulnerable? Respond with only 'Yes' or 'No'. \n\n {code}"""
         }
     }
 
@@ -75,17 +57,18 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
             verbose: Whether to print progress
         """
         self.client = client
-        self.agents = agents or ["security_analyst", "code_reviewer", "attacker"]
+        self.agents = agents or ["security_analyst", "penetration_tester", "software_security_engineer"]
         self.voting_strategy = voting_strategy
         self.verbose = verbose
         self.name = "concoll_stage3"
 
-    def predict(self, code: str) -> Tuple[int, Dict, object]:
+    def predict(self, code: str, examples: List["RAGExample"] = None) -> Tuple[int, Dict, object]:
         """
         Make prediction through multi-agent collaboration.
 
         Args:
             code: Source code to analyze
+            examples: Retrieved examples from Stage 2 (optional)
 
         Returns:
             Tuple of (prediction, agent_votes, total_usage)
@@ -93,13 +76,19 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
         agent_votes = {}
         total_usage = TokenUsage()
 
+        # Format examples into text
+        if examples:
+            examples_text = self._format_examples(examples)
+        else:
+            examples_text = "No examples available."
+
         # Get prediction from each agent
         for agent_key in self.agents:
             agent = self.AGENTS[agent_key]
 
             messages = [
                 {"role": "system", "content": agent["system"]},
-                {"role": "user", "content": agent["prompt"].format(code=code)}
+                {"role": "user", "content": agent["prompt"].format(code=code, examples=examples_text)}
             ]
 
             response, usage = self.client.chat_completion(messages)
@@ -122,6 +111,20 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
         final_vote = self._combine_votes(agent_votes)
 
         return final_vote, agent_votes, total_usage
+
+    def _format_examples(self, examples: List) -> str:
+        """Format RAG examples into prompt text."""
+        if not examples:
+            return "No examples available."
+
+        formatted = []
+        for i, ex in enumerate(examples, 1):
+            label_str = "VULNERABLE" if ex.label == 1 else "SAFE"
+            cwe_str = ex.cwe if hasattr(ex, 'cwe') and ex.cwe else "N/A"
+            formatted.append(f"""Example {i} ({label_str}, {cwe_str}):
+{ex.code}""")
+
+        return "\n\n".join(formatted)
 
     def _combine_votes(self, votes: Dict[str, int]) -> int:
         """
@@ -148,7 +151,8 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
     def predict_batch(
         self,
         codes: List[str],
-        indices: List[int] = None
+        indices: List[int] = None,
+        examples_list: List[List] = None
     ) -> Tuple[List[int], Dict[str, List[int]], object]:
         """
         Make predictions for a batch of codes.
@@ -156,6 +160,7 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
         Args:
             codes: List of source code snippets
             indices: Indices of codes to process (None = all)
+            examples_list: List of examples from Stage 2 for each code
 
         Returns:
             Tuple of (predictions, all_agent_votes, total_usage)
@@ -175,7 +180,9 @@ Respond with 'Yes' if exploitable, 'No' if safe."""
                 print(f"    Sample {idx + 1}:")
 
             code = codes[idx]
-            vote, agent_votes, usage = self.predict(code)
+            # Get examples for this specific code
+            examples = examples_list[idx] if examples_list and idx < len(examples_list) else None
+            vote, agent_votes, usage = self.predict(code, examples)
 
             predictions[idx] = vote
             # Handle both simple usage and nested (usage, logprobs_info) tuple
