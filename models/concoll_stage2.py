@@ -118,6 +118,7 @@ IMPORTANT: Be balanced in your assessment. Use the examples as reference but mak
         self,
         client,
         retriever: RAGRetriever,
+        confidence_threshold: float = 0.3,
         verbose: bool = True
     ):
         """
@@ -126,10 +127,12 @@ IMPORTANT: Be balanced in your assessment. Use the examples as reference but mak
         Args:
             client: LLM client
             retriever: RAGRetriever for finding examples
+            confidence_threshold: Threshold for Stage 2 acceptance (th2)
             verbose: Whether to print progress
         """
         self.client = client
         self.retriever = retriever
+        self.confidence_threshold = confidence_threshold
         self.verbose = verbose
         self.name = "concoll_stage2"
 
@@ -137,7 +140,7 @@ IMPORTANT: Be balanced in your assessment. Use the examples as reference but mak
         self,
         code: str,
         true_label: Optional[int] = None
-    ) -> Tuple[int, object, List["RAGExample"]]:
+    ) -> Tuple[int, object, List["RAGExample"], bool]:
         """
         Make prediction with RAG context.
 
@@ -146,7 +149,7 @@ IMPORTANT: Be balanced in your assessment. Use the examples as reference but mak
             true_label: Optional true label for better retrieval
 
         Returns:
-            Tuple of (prediction, token_usage, examples)
+            Tuple of (prediction, token_usage, examples, should_accept)
         """
         # Retrieve similar examples
         examples = self.retriever.retrieve(code, true_label)
@@ -168,12 +171,50 @@ IMPORTANT: Be balanced in your assessment. Use the examples as reference but mak
 
         # Parse response
         response_lower = response.strip().lower()
+        top_token = "Yes" if 'yes' in response_lower[:10] else "No"
         if 'yes' in response_lower[:10]:
             prediction = 1
         else:
             prediction = 0
 
-        return prediction, usage, examples
+        # Get confidence info if available
+        confidence_score = 0.15  # Default low confidence for non-logprobs
+        if isinstance(usage, tuple) and len(usage) > 1:
+            logprobs_info = usage[1]
+            if isinstance(logprobs_info, dict):
+                confidence_score = logprobs_info.get("confidence", 0.15)
+                top_token = logprobs_info.get("top_token", top_token)
+
+        # Check if should accept (according to paper: C.S. >= th2 and top-1 is Yes/No)
+        should_accept = self.should_accept(confidence_score, top_token)
+
+        return prediction, usage, examples, should_accept
+
+    def should_accept(self, confidence_score: float, top_token: str) -> bool:
+        """
+        Decide whether to accept prediction based on confidence.
+
+        According to the paper: "If the score exceeds a second predefined threshold
+        (th2) and the top-1 prediction corresponds to a valid class label
+        ('Yes' or 'No'), the model's decision is approved."
+
+        Args:
+            confidence_score: Confidence score from logprobs
+            top_token: The top predicted token
+
+        Returns:
+            True if confidence score exceeds threshold AND top-1 is Yes/No
+        """
+        # Check threshold
+        if confidence_score < self.confidence_threshold:
+            return False
+
+        # Check if top-1 token is Yes or No (case-insensitive)
+        top_token_lower = top_token.lower() if top_token else ""
+        if top_token_lower in ["yes", "no"]:
+            return True
+
+        return False
 
     def _format_examples(self, examples: List[RAGExample]) -> str:
         """Format examples into prompt text."""
@@ -195,7 +236,7 @@ Example {i} ({label_str}, {ex.cwe}):
         codes: List[str],
         labels: List[int],
         indices: List[int] = None
-    ) -> Tuple[List[int], object, List[List["RAGExample"]]]:
+    ) -> Tuple[List[int], object, List[List["RAGExample"]], List[bool]]:
         """
         Make predictions for a batch of codes.
 
@@ -205,13 +246,14 @@ Example {i} ({label_str}, {ex.cwe}):
             indices: Indices of codes to process (None = all)
 
         Returns:
-            Tuple of (predictions, total_usage, examples_list)
+            Tuple of (predictions, total_usage, examples_list, accepted_list)
         """
         if indices is None:
             indices = range(len(codes))
 
         predictions = [None] * len(codes)
         examples_list = [[] for _ in range(len(codes))]
+        accepted_list = [False] * len(codes)
         total_usage = TokenUsage()
 
         for i, idx in enumerate(indices):
@@ -221,9 +263,10 @@ Example {i} ({label_str}, {ex.cwe}):
             code = codes[idx]
             label = labels[idx] if idx < len(labels) else None
 
-            prediction, usage, examples = self.predict(code, label)
+            prediction, usage, examples, should_accept = self.predict(code, label)
             predictions[idx] = prediction
             examples_list[idx] = examples
+            accepted_list[idx] = should_accept
             # Handle both simple usage and nested (usage, logprobs_info) tuple
             if isinstance(usage, tuple):
                 actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
@@ -234,7 +277,7 @@ Example {i} ({label_str}, {ex.cwe}):
         if self.verbose:
             print(f"  Stage 2: Completed {len(indices)} samples")
 
-        return predictions, total_usage, examples_list
+        return predictions, total_usage, examples_list, accepted_list
 
     def get_name(self) -> str:
         """Get method name."""

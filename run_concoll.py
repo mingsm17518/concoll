@@ -99,6 +99,7 @@ class ConCollFramework:
         self.stage2 = RAGPredictor(
             client=self.client,
             retriever=retriever,
+            confidence_threshold=self.confidence_threshold,  # th2 = th1 for now
             verbose=self.verbose
         )
 
@@ -189,22 +190,30 @@ class ConCollFramework:
             if self.verbose:
                 print(f"\nStage 2: RAG with External Examples")
 
-            stage2_preds, stage2_usage, stage2_examples = self.stage2.predict_batch(
+            stage2_preds, stage2_usage, stage2_examples, stage2_accepted = self.stage2.predict_batch(
                 codes, labels, deferred_indices
             )
 
-            # If using Stage 3, don't finalize predictions yet - pass to Stage 3
-            # Otherwise, use Stage 2 predictions as final
-            if self.use_stage3 and self.stage3 is not None:
-                # Stage 2 predictions become inputs for Stage 3
-                for idx in deferred_indices:
-                    stage_stats["stage2_used"] += 1
-                stage2_final_preds = stage2_preds
-            else:
-                # Use Stage 2 predictions as final
-                for idx in deferred_indices:
-                    predictions[idx] = stage2_preds[idx]
-                    stage_stats["stage2_used"] += 1
+            # Find samples that need Stage 3 (not accepted in Stage 2)
+            stage3_indices = []
+            for i, idx in enumerate(deferred_indices):
+                stage_stats["stage2_used"] += 1
+                if self.use_stage3 and self.stage3 is not None:
+                    # Check if Stage 2 accepted this prediction
+                    if not stage2_accepted[i]:
+                        # Need to go to Stage 3
+                        stage3_indices.append(idx)
+                    else:
+                        # Stage 2 accepted - use prediction
+                        predictions[idx] = stage2_preds[i]
+                else:
+                    # No Stage 3 - use Stage 2 as final
+                    predictions[idx] = stage2_preds[i]
+
+            # Print Stage 2 acceptance stats
+            accepted_count = sum(stage2_accepted)
+            if self.verbose:
+                print(f"Stage 2: Accepted {accepted_count}/{len(deferred_indices)}, Deferred {len(deferred_indices) - accepted_count} to Stage 3")
 
             total_usage += type('Usage', (), {
                 'prompt_tokens': stage2_usage.prompt_tokens,
@@ -214,19 +223,16 @@ class ConCollFramework:
             })()
             stage_stats["stage2_cost"] = stage2_usage.total_tokens
 
-            if self.verbose:
-                print(f"Stage 2 processed: {stage_stats['stage2_used']} samples")
-
         # Stage 3: Multi-Agent Collaboration
-        # Run Stage 3 for all samples that came from Stage 2
-        if self.use_stage3 and self.stage3 is not None and deferred_indices:
+        # Run Stage 3 only for samples not accepted in Stage 2
+        if self.use_stage3 and self.stage3 is not None and stage3_indices:
             if self.verbose:
                 print(f"\nStage 3: Multi-Agent Collaboration")
 
             stage3_preds, stage3_votes, stage3_usage = self.stage3.predict_batch(
-                codes, deferred_indices, stage2_examples
+                codes, stage3_indices, stage2_examples
             )
-            for idx in deferred_indices:
+            for idx in stage3_indices:
                 predictions[idx] = stage3_preds[idx]
                 stage_stats["stage3_used"] += 1
 
@@ -237,7 +243,7 @@ class ConCollFramework:
                 total_usage.total_tokens += stage3_usage.total_tokens
                 total_usage.api_calls += stage3_usage.api_calls
             else:
-                total_usage.api_calls += len(deferred_indices) * len(self.stage3.agents)
+                total_usage.api_calls += len(stage3_indices) * len(self.stage3.agents)
 
             stage_stats["stage3_cost"] = getattr(stage3_usage, 'total_tokens', 0)
             if self.verbose:
