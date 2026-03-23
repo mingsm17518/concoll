@@ -194,6 +194,7 @@ class ConCollFramework:
                 print(f"  (Forcing all samples through all stages)")
 
         # Stage 2: RAG for deferred samples
+        stage3_indices = []  # Initialize for case when no Stage 2 needed
         if deferred_indices:
             if self.verbose:
                 print(f"\nStage 2: RAG with External Examples")
