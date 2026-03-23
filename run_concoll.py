@@ -403,6 +403,10 @@ def run_experiment(config: Config, use_test_data: bool = False,
     # Setup stages with training examples
     framework.setup_stages(train_samples)
 
+    # Initialize for error recovery
+    predictions = None
+    stage_stats = None
+
     # Run predictions with error handling
     try:
         predictions, stage_stats = framework.predict_batch(codes, labels)
@@ -418,22 +422,25 @@ def run_experiment(config: Config, use_test_data: bool = False,
         if hasattr(framework, '_last_stage_stats'):
             stage_stats = framework._last_stage_stats
 
-        # Try to compute metrics with available predictions
-        valid_indices = [i for i, p in enumerate(predictions) if p is not None]
-        valid_preds = [predictions[i] for i in valid_indices]
-        valid_labels = [labels[i] for i in valid_indices]
-
-        if len(valid_preds) > 0:
-            save_intermediate_result(config, predictions, labels,
-                                   stage_stats if 'stage_stats' in dir() else
-                                   {"stage1_accepted": 0, "stage2_used": 0, "stage3_used": 0,
-                                    "stage1_cost": 0, "stage2_cost": 0, "stage3_cost": 0},
-                                   3)  # Assume Stage 3 was running
-            binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
-            print(f"[INFO] Saved results for {len(valid_preds)}/{len(predictions)} samples")
-            print(f"[INFO] Accuracy so far: {binary_metrics.accuracy:.4f}")
+        if predictions is None:
+            print("[WARNING] No predictions available to save")
         else:
-            print("[WARNING] No valid predictions to save")
+            # Try to compute metrics with available predictions
+            valid_indices = [i for i, p in enumerate(predictions) if p is not None]
+            valid_preds = [predictions[i] for i in valid_indices]
+            valid_labels = [labels[i] for i in valid_indices]
+
+            if len(valid_preds) > 0:
+                save_intermediate_result(config, predictions, labels,
+                                       stage_stats if stage_stats else
+                                       {"stage1_accepted": 0, "stage2_used": 0, "stage3_used": 0,
+                                        "stage1_cost": 0, "stage2_cost": 0, "stage3_cost": 0},
+                                       3)  # Assume Stage 3 was running
+                binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
+                print(f"[INFO] Saved results for {len(valid_preds)}/{len(predictions)} samples")
+                print(f"[INFO] Accuracy so far: {binary_metrics.accuracy:.4f}")
+            else:
+                print("[WARNING] No valid predictions to save")
 
         # Re-raise to halt execution
         raise

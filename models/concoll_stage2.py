@@ -26,48 +26,171 @@ class RAGExample:
 
 class RAGRetriever:
     """
-    Retriever for finding similar vulnerability examples.
+    Retriever for finding similar vulnerability examples using semantic embeddings.
 
-    Uses simple similarity metrics (can be enhanced with embeddings).
+    Uses sentence-transformers to compute embeddings and cosine similarity
+    for semantic retrieval of relevant examples.
     """
 
     def __init__(
         self,
         examples: List[RAGExample],
         top_k: int = 3,
-        random_seed: int = 42
+        random_seed: int = 42,
+        embedding_model: str = "microsoft/graphcodebert-base",
+        use_fallback: bool = True,
+        use_semantic: bool = True
     ):
         """
-        Initialize RAG Retriever.
+        Initialize RAG Retriever with semantic embeddings.
 
         Args:
             examples: List of example cases (from training set)
             top_k: Number of examples to retrieve
             random_seed: Random seed for sampling
+            embedding_model: Model name for sentence-transformers
+            use_fallback: If True, fall back to random sampling if embedding fails
+            use_semantic: If True, try to use semantic retrieval; if False, use random
         """
         self.examples = examples
         self.top_k = top_k
         self.random_seed = random_seed
+        self.embedding_model_name = embedding_model
+        self.use_fallback = use_fallback
+        self.use_semantic = use_semantic
+        self._model = None
+        self._example_embeddings = None
+        self._embedding_failed = False
+
+    @property
+    def model(self):
+        """Lazy load the embedding model."""
+        if self._model is None and not self._embedding_failed:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self._model = SentenceTransformer(self.embedding_model_name)
+            except Exception as e:
+                if self.use_fallback:
+                    print(f"[RAG] Warning: Failed to load embedding model '{self.embedding_model_name}': {e}")
+                    print("[RAG] Falling back to random sampling for retrieval.")
+                    self._embedding_failed = True
+                else:
+                    raise ImportError(
+                        f"sentence-transformers is required for semantic RAG. "
+                        f"Install it with: pip install sentence-transformers. Error: {e}"
+                    )
+        return self._model
+
+    def _get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Get embeddings for a list of texts."""
+        if self._embedding_failed or self._model is None:
+            return None
+        return self._model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+
+    def _compute_cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Compute cosine similarity between two vectors."""
+        import numpy as np
+        v1 = np.array(vec1)
+        v2 = np.array(vec2)
+        return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8))
+
+    def _build_example_embeddings(self):
+        """Pre-compute embeddings for all examples (done once)."""
+        if self._example_embeddings is None:
+            texts = [ex.code for ex in self.examples]
+            self._example_embeddings = self._get_embeddings(texts)
 
     def retrieve(self, query_code: str, query_label: Optional[int] = None) -> List[RAGExample]:
         """
-        Retrieve similar examples for the query code.
+        Retrieve semantically similar examples for the query code.
+
+        Uses cosine similarity between query embedding and example embeddings
+        to find the most relevant examples.
 
         Args:
             query_code: The code to find similar examples for
             query_label: Optional label to match (for balanced retrieval)
 
         Returns:
-            List of retrieved examples
+            List of retrieved examples sorted by relevance
         """
-        # Balanced retrieval: always return mixed examples (both vulnerable and safe)
-        # This prevents model bias from seeing only one type of example
+        # Skip semantic retrieval if disabled
+        if not self.use_semantic:
+            return self._retrieve_random(query_code, query_label)
 
+        # Fall back to random sampling if embedding failed
+        if self._embedding_failed or self._model is None:
+            return self._retrieve_random(query_code, query_label)
+
+        # Build example embeddings if not already done
+        self._build_example_embeddings()
+
+        # Check if embeddings were built successfully
+        if self._example_embeddings is None:
+            return self._retrieve_random(query_code, query_label)
+
+        # Get query embedding
+        query_embedding = self._get_embeddings([query_code])
+        if query_embedding is None:
+            return self._retrieve_random(query_code, query_label)
+        query_embedding = query_embedding[0]
+
+        # Compute similarities for all examples
+        similarities = []
+        for i, ex in enumerate(self.examples):
+            sim = self._compute_cosine_similarity(query_embedding, self._example_embeddings[i])
+            similarities.append((i, sim, ex))
+
+        # Separate by label for balanced retrieval
+        vuln_candidates = [(i, sim, ex) for i, sim, ex in similarities if ex.label == 1]
+        safe_candidates = [(i, sim, ex) for i, sim, ex in similarities if ex.label == 0]
+
+        # Sort by similarity (descending)
+        vuln_candidates.sort(key=lambda x: x[1], reverse=True)
+        safe_candidates.sort(key=lambda x: x[1], reverse=True)
+
+        # Select balanced examples (half vulnerable, half safe)
+        selected = []
+        num_vuln = self.top_k // 2
+        num_safe = self.top_k - num_vuln
+
+        # Add top similar vulnerable examples
+        for i in range(min(num_vuln, len(vuln_candidates))):
+            selected.append(vuln_candidates[i][2])
+
+        # Add top similar safe examples
+        for i in range(min(num_safe, len(safe_candidates))):
+            selected.append(safe_candidates[i][2])
+
+        # If we don't have enough, fill from remaining (sorted by similarity)
+        if len(selected) < self.top_k:
+            all_selected_idx = set(id(ex) for ex in selected)
+            remaining = [c for c in similarities if id(c[2]) not in all_selected_idx]
+            remaining.sort(key=lambda x: x[1], reverse=True)
+
+            for _, _, ex in remaining[:self.top_k - len(selected)]:
+                selected.append(ex)
+
+        # Shuffle to avoid order bias
+        random.shuffle(selected)
+
+        return selected
+
+    def _retrieve_random(self, query_code: str, query_label: Optional[int] = None) -> List[RAGExample]:
+        """
+        Fallback random retrieval (used when embedding model fails).
+
+        Args:
+            query_code: The code to find similar examples for (ignored)
+            query_label: Optional label to match (for balanced retrieval)
+
+        Returns:
+            List of randomly selected examples
+        """
         vuln_examples = [e for e in self.examples if e.label == 1]
         safe_examples = [e for e in self.examples if e.label == 0]
 
         selected = []
-        # Select balanced examples
         num_vuln = self.top_k // 2
         num_safe = self.top_k - num_vuln
 
@@ -81,14 +204,11 @@ class RAGRetriever:
         else:
             selected.extend(safe_examples)
 
-        # If we still don't have enough, fill from all
         while len(selected) < self.top_k and len(self.examples) > len(selected):
             remaining = [e for e in self.examples if e not in selected]
             selected.extend(random.sample(remaining, min(self.top_k - len(selected), len(remaining))))
 
-        # Shuffle to avoid order bias
         random.shuffle(selected)
-
         return selected
 
 
@@ -272,7 +392,8 @@ Example {i} ({label_str}, {ex.cwe}):
                 actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
             else:
                 actual_usage = usage
-            total_usage += actual_usage
+            if actual_usage is not None:
+                total_usage += actual_usage
 
         if self.verbose:
             print(f"  Stage 2: Completed {len(indices)} samples")

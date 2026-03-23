@@ -46,6 +46,7 @@ class UnifiedClient:
         temperature: float = 0.0,
         max_tokens: int = 2048,
         enable_logprobs: bool = True,  # Request logprobs if supported
+        content_format: str = "object_list",  # "string" or "object_list" - for anthropic-compatible APIs
     ):
         """
         Initialize unified client.
@@ -58,12 +59,14 @@ class UnifiedClient:
             temperature: Sampling temperature
             max_tokens: Max tokens to generate
             enable_logprobs: Whether to request logprobs (for confidence scoring)
+            content_format: "string" or "object_list" - MiniMax requires "object_list"
         """
         self.provider = provider
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.enable_logprobs = enable_logprobs
+        self.content_format = content_format
         self.usage = TokenUsage()
 
         if provider == "openai":
@@ -82,7 +85,7 @@ class UnifiedClient:
             if not ANTHROPIC_AVAILABLE:
                 raise ImportError("anthropic package not installed")
             self.client = Anthropic(api_key=api_key, base_url=base_url)
-            self._supports_logprobs = False  # GLM/MiniMax don't support logprobs
+            self._supports_logprobs = enable_logprobs  # Configurable based on provider
 
         else:
             raise ValueError(f"Unknown provider: {provider}")
@@ -165,8 +168,7 @@ class UnifiedClient:
             return content, usage
 
         elif self.provider == "anthropic":
-            # Anthropic-compatible: No logprobs support for GLM/MiniMax
-            # Convert messages format
+            # Anthropic-compatible: configurable format
             system_message = ""
             user_messages = []
 
@@ -174,9 +176,15 @@ class UnifiedClient:
                 if msg["role"] == "system":
                     system_message = msg["content"]
                 else:
+                    # Convert content based on content_format config
+                    # "object_list": [{"type": "text", "text": "..."}] for MiniMax
+                    # "string": "plain text" for some APIs
+                    content = msg["content"]
+                    if self.content_format == "object_list" and isinstance(content, str):
+                        content = [{"type": "text", "text": content}]
                     user_messages.append({
                         "role": msg["role"],
-                        "content": msg["content"]
+                        "content": content
                     })
 
             response = self.client.messages.create(
@@ -252,5 +260,6 @@ def create_client_from_config(config) -> UnifiedClient:
         model=config.model,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
-        enable_logprobs=True  # Always enable for confidence scoring
+        enable_logprobs=config.supports_logprobs,  # Use config value
+        content_format=config.content_format  # "string" or "object_list"
     )

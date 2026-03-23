@@ -1,6 +1,9 @@
 # OpenAI API for GPT-4o
 openai>=1.0.0
 
+# Sentence embeddings for semantic RAG retrieval
+sentence-transformers
+
 # HuggingFace datasets
 datasets
 huggingface_hub

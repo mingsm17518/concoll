@@ -50,6 +50,12 @@ class Config:
     temperature: float = 0.0  # Deterministic for vulnerability detection
     max_tokens: int = 2048
 
+    # API Format Configuration (for different providers)
+    # content_format: "string" or "object_list" - MiniMax requires object_list
+    content_format: str = os.getenv("CONTENT_FORMAT", "object_list")
+    # supports_logprobs: whether API returns logprobs for confidence scoring
+    supports_logprobs: bool = os.getenv("SUPPORTS_LOGPROBS", "false").lower() == "true"
+
     # Output Configuration
     results_dir: str = "results"
     verbose: bool = True

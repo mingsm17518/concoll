@@ -89,26 +89,67 @@ logprobs = [
 
 ### 切换模型
 
+**只需修改 `.env` 文件，无需改动任何 Python 代码！**
+
 在 `.env` 中配置：
 
-```bash
-# DeepSeek (OpenAI 兼容)
-API_PROVIDER=openai
-OPENAI_API_KEY=your_key
-MODEL=deepseek-chat
-
-# 或 GPT-4
-API_PROVIDER=openai
-OPENAI_API_KEY=your_key
-MODEL=gpt-4o
-
-# 或 GLM/MiniMax (Anthropic 兼容)
+```
+# ================================================================================
+# 方案 1: MiniMax (当前使用)
+# ================================================================================
 API_PROVIDER=anthropic
 ANTHROPIC_AUTH_TOKEN=your_key
+ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic
 ANTHROPIC_MODEL=MiniMax-M2.1
+CONTENT_FORMAT=object_list
+SUPPORTS_LOGPROBS=false
+
+# ================================================================================
+# 方案 2: DeepSeek (OpenAI 兼容)
+# ================================================================================
+API_PROVIDER=openai
+OPENAI_API_KEY=your_key
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+OPENAI_MODEL=deepseek-chat
+CONTENT_FORMAT=string
+SUPPORTS_LOGPROBS=true
+
+# ================================================================================
+# 方案 3: GPT-4
+# ================================================================================
+API_PROVIDER=openai
+OPENAI_API_KEY=your_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o
+CONTENT_FORMAT=string
+SUPPORTS_LOGPROBS=true
 ```
 
-**无需修改代码！** UnifiedClient 会自动处理 API 调用格式和 logprobs 提取。
+### 模型配置参数对照表
+
+| 参数 | 说明 | MiniMax | DeepSeek | GPT-4 |
+|------|------|:-------:|:--------:|:-----:|
+| `API_PROVIDER` | 提供商 | anthropic | openai | openai |
+| `ANTHROPIC_AUTH_TOKEN` | Anthropic 格式 API Key | ✅ | - | - |
+| `OPENAI_API_KEY` | OpenAI 格式 API Key | - | ✅ | ✅ |
+| `ANTHROPIC_BASE_URL` | Anthropic 端点 | ✅ | - | - |
+| `OPENAI_BASE_URL` | OpenAI 端点 | - | ✅ | ✅ |
+| `ANTHROPIC_MODEL` / `OPENAI_MODEL` | 模型名称 | MiniMax-M2.1 | deepseek-chat | gpt-4o |
+| `CONTENT_FORMAT` | 消息内容格式 | object_list | string | string |
+| `SUPPORTS_LOGPROBS` | 是否支持 logprobs | false | true | true |
+
+**说明**：
+- `✅` = 需要配置
+- `-` = 不适用，配置了也不会被使用
+
+### 配置说明
+
+| 参数 | 说明 | 可选值 |
+|------|------|--------|
+| `CONTENT_FORMAT` | 消息内容格式 | `object_list` (MiniMax/GLM), `string` (OpenAI) |
+| `SUPPORTS_LOGPROBS` | 是否支持 logprobs | `true` (DeepSeek/GPT-4), `false` (MiniMax/GLM) |
+
+**无需修改代码！** 只需修改 `.env` 文件即可切换模型。代码会自动根据 `API_PROVIDER` 选择对应的客户端和配置。
 
 ## 项目结构
 
@@ -189,6 +230,70 @@ API 调用: LLM with examples
 | `--stage2-ratio` | Stage 2 比例 | 0.25 |
 | `--stage3-ratio` | Stage 3 比例 | 0.05 |
 | `--force-stages` | 强制所有样本通过所有阶段 | - |
+
+## 测试模式说明
+
+### Simulate 模式 vs 真实 API 模式
+
+由于不同 LLM 对 `logprobs` 的支持情况不同，ConColl 提供了两种运行模式：
+
+| 模式 | 说明 | 使用场景 |
+|------|------|----------|
+| `--simulate` | 根据预设比例人为分配置信度 | 测试流程、API 不可用时 |
+| 真实 API | 使用模型返回的真实 logprobs | 正式实验 |
+
+### Simulate 模式原理
+
+当使用 `--simulate` 参数时，代码会根据预设比例人为分配样本到不同阶段：
+
+```
+默认比例: stage1=70%, stage2=25%, stage3=5%
+
+分配逻辑:
+- stage1: 置信度 = threshold + random(0.1, 0.3)  # 高置信度
+- stage2: 置信度 = threshold - random(0.05, 0.15) # 中等置信度
+- stage3: 置信度 = random(0.0, 0.1)               # 低置信度
+```
+
+### 真实 API 模式下的 MiniMax
+
+MiniMax 不支持 `logprobs`，因此使用固定置信度 **0.15**：
+
+```python
+# concoll_stage1.py
+confidence_score = 0.15  # 默认低置信度
+```
+
+由于 0.15 < th1(0.3) < th2(0.2)，**所有样本都会进入 Stage 2/3**。
+
+### 测试结果对比
+
+#### 模拟数据测试 (2 samples)
+
+| 模式 | Stage 1 | Stage 2 | Stage 3 | API Calls | Accuracy |
+|------|---------|---------|---------|-----------|----------|
+| `--simulate` | 4/6 接受 | 0/2 接受 | 2 处理 | 14 | 0.83 |
+| 真实 API | 0/6 接受 | 0/6 接受 | 6 处理 | 20 | - |
+
+#### PrimeVul 小样本测试 (4 samples)
+
+| 模式 | Stage 1 | Stage 2 | Stage 3 | Tokens | Accuracy |
+|------|---------|---------|---------|--------|----------|
+| `--simulate` | 2/4 接受 | 0/2 接受 | 2 处理 | 21,931 | 0.50 |
+| 真实 API | 0/4 接受 | 0/4 接受 | 4 处理 | 47,882 | 0.50 |
+
+### 运行建议
+
+```bash
+# 开发/调试阶段：使用 simulate 模式快速测试流程
+python run_concoll.py --test-data --max-samples 10 --simulate
+
+# 正式实验：使用支持 logprobs 的模型（如 DeepSeek/GPT-4）
+python run_concoll.py --max-samples 100
+
+# MiniMax 特殊处理：所有样本会走完三阶段
+python run_concoll.py --max-samples 50  # 无需 --simulate
+```
 
 ## 结果格式
 

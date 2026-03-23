@@ -97,7 +97,8 @@ class MultiAgentCollaboration:
                 actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
             else:
                 actual_usage = usage
-            total_usage += actual_usage
+            if actual_usage is not None:
+                total_usage += actual_usage
 
             # Parse response
             response_lower = response.strip().lower()
@@ -190,7 +191,8 @@ class MultiAgentCollaboration:
                 actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
             else:
                 actual_usage = usage
-            total_usage += actual_usage
+            if actual_usage is not None:
+                total_usage += actual_usage
 
             for agent, agent_vote in agent_votes.items():
                 all_agent_votes[agent][idx] = agent_vote
