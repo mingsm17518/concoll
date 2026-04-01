@@ -96,81 +96,44 @@ Analyze C code for security vulnerabilities carefully."""
 
     def _call_with_logprobs(self, messages: List[Dict]) -> Tuple[str, object]:
         """Call API with logprobs enabled."""
-        # Check if using Anthropic or OpenAI client
-        if hasattr(self.client, 'client'):
-            # Anthropic client
-            import anthropic
-            response = self.client.client.messages.create(
-                model=self.client.model,
-                messages=[{k: v for k, v in m.items() if k != 'system'} for m in messages],
-                system=messages[0]['content'],
+        # Use unified client's chat_completion method which handles logprobs correctly
+        try:
+            response, usage_info = self.client.chat_completion(
+                messages,
                 max_tokens=10,
                 temperature=0,
-                top_k=1,
+                top_logprobs=5
             )
 
-            content = response.content[0].text
+            # Check if we got logprobs info
+            if isinstance(usage_info, tuple) and len(usage_info) > 1:
+                logprobs_info = usage_info[1]
+                if isinstance(logprobs_info, dict) and logprobs_info.get("has_logprobs", False):
+                    usage = usage_info[0]
+                    return response, (usage, logprobs_info)
 
-            # Anthropic doesn't provide logprobs by default
-            # We'll estimate confidence from response certainty
-            confidence_score = 0.5  # Default medium confidence
-            logprobs_info = {"confidence": confidence_score, "has_logprobs": False}
-
-            return content, logprobs_info
-
-        else:
-            # OpenAI client or compatible
-            response = self.client.client.chat.completions.create(
-                model=self.client.model,
-                messages=messages,
-                max_tokens=10,
-                temperature=0,
-                logprobs=True,
-                top_logprobs=5,
-            )
-
-            content = response.choices[0].message.content
-
-            # Extract logprobs for first token
-            logprobs = response.choices[0].logprobs.content
-            if logprobs and len(logprobs) > 0:
-                first_token_logprobs = logprobs[0].top_logprobs
-                top_token = list(first_token_logprobs.keys())[0]
-                top_prob = first_token_logprobs[top_token]
-
-                if len(first_token_logprobs) > 1:
-                    second_token = list(first_token_logprobs.keys())[1]
-                    second_prob = first_token_logprobs[second_token]
-                else:
-                    second_prob = 0.0
-
-                # Convert logprobs to probabilities
-                top_prob = max(top_prob, -100)  # Clamp
-                second_prob = max(second_prob, -100)
-
-                import math
-                top_prob = math.exp(top_prob)
-                second_prob = math.exp(second_prob)
-
-                confidence_score = top_prob - second_prob
-                logprobs_info = {
-                    "confidence": confidence_score,
-                    "top_token": top_token,
-                    "top_prob": top_prob,
-                    "second_prob": second_prob,
-                    "has_logprobs": True
-                }
-            else:
-                logprobs_info = {"confidence": 0.5, "has_logprobs": False}
-
+            # No logprobs - return with default confidence
             usage = type('Usage', (), {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens,
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'total_tokens': 0,
                 'api_calls': 1
             })()
+            logprobs_info = {"confidence_score": 0.5, "has_logprobs": False}
+            return response, (usage, logprobs_info)
 
-            return content, (usage, logprobs_info)
+        except Exception as e:
+            # Fallback to simple call
+            print(f"[Warning] Logprobs failed: {e}")
+            response, usage = self.client.chat_completion(messages)
+            usage_simple = type('Usage', (), {
+                'prompt_tokens': getattr(usage, 'prompt_tokens', 0),
+                'completion_tokens': getattr(usage, 'completion_tokens', 0),
+                'total_tokens': getattr(usage, 'total_tokens', 0),
+                'api_calls': 1
+            })()
+            logprobs_info = {"confidence_score": 0.5, "has_logprobs": False}
+            return response, (usage_simple, logprobs_info)
 
     def _parse_response(self, response: str, usage_info) -> PredictionResult:
         """Parse response and calculate confidence score."""
@@ -199,9 +162,10 @@ Analyze C code for security vulnerabilities carefully."""
             usage, logprobs_info = usage_info
             # Check if logprobs are actually available (not just placeholder)
             if logprobs_info.get("has_logprobs", False):
-                confidence_score = logprobs_info.get("confidence", 0.5)
-                top_probability = logprobs_info.get("top_prob", 0.5)
-                second_probability = logprobs_info.get("second_prob", 0.0)
+                confidence_score = logprobs_info.get("confidence_score", logprobs_info.get("confidence", 0.5))
+                top_probability = logprobs_info.get("top_probability", 0.5)
+                second_probability = logprobs_info.get("second_probability", logprobs_info.get("second_prob", 0.0))
+                top_token = logprobs_info.get("top_token", top_token)
             else:
                 # For models without logprobs (GLM/MiniMax), use low default confidence
                 # so samples can proceed to Stage 2/3 for more thorough analysis
@@ -304,7 +268,7 @@ Analyze C code for security vulnerabilities carefully."""
             # Low confidence: will go through Stage 2 then Stage 3
             return random.uniform(0.0, 0.1)
 
-    def predict_batch(self, codes: List[str]) -> Tuple[List[int], List[bool], object]:
+    def predict_batch(self, codes: List[str]) -> Tuple[List[int], List[bool], object, List[dict]]:
         """
         Make predictions for a batch of codes.
 
@@ -312,10 +276,15 @@ Analyze C code for security vulnerabilities carefully."""
             codes: List of source code snippets
 
         Returns:
-            Tuple of (predictions, accepted_flags, total_usage)
+            Tuple of (predictions, accepted_flags, total_usage, confidence_details)
+            - predictions: List of predictions (0 or 1)
+            - accepted: List of acceptance flags
+            - total_usage: Total token usage
+            - confidence_details: List of dicts with confidence info
         """
         predictions = []
         accepted = []
+        confidence_details = []  # Store confidence details for each sample
         total_usage = type('Usage', (), {
             'prompt_tokens': 0,
             'completion_tokens': 0,
@@ -366,6 +335,16 @@ Analyze C code for security vulnerabilities carefully."""
                 predictions.append(prediction)
                 accepted.append(simulated_confidence >= self.confidence_threshold)
 
+                # Save confidence details (simulated)
+                confidence_details.append({
+                    "confidence_score": simulated_confidence,
+                    "top_token": "Yes" if prediction == 1 else "No",
+                    "top_probability": 0.5,
+                    "second_probability": 0.3,
+                    "raw_response": response[:100] if response else "",
+                    "simulated": True
+                })
+
                 # Accumulate usage
                 if hasattr(usage, 'prompt_tokens'):
                     total_usage.prompt_tokens += usage.prompt_tokens
@@ -382,6 +361,15 @@ Analyze C code for security vulnerabilities carefully."""
                 predictions.append(result.prediction)
                 accepted.append(self.should_accept(result))
 
+                # Save confidence details
+                confidence_details.append({
+                    "confidence_score": result.confidence_score,
+                    "top_token": result.top_token,
+                    "top_probability": result.top_probability,
+                    "second_probability": result.second_probability,
+                    "raw_response": result.raw_response[:100] if result.raw_response else ""
+                })
+
                 # Accumulate usage
                 if hasattr(result.token_usage, 'prompt_tokens'):
                     total_usage.prompt_tokens += result.token_usage.prompt_tokens
@@ -395,7 +383,7 @@ Analyze C code for security vulnerabilities carefully."""
             print(f"  Stage 1: Accepted {accepted_count}/{len(codes)} (confident predictions)")
             print(f"  Stage 1: Deferred {len(codes) - accepted_count}/{len(codes)} (need Stage 2/3)")
 
-        return predictions, accepted, total_usage
+        return predictions, accepted, total_usage, confidence_details
 
     def get_name(self) -> str:
         """Get method name."""

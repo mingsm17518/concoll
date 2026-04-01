@@ -44,7 +44,6 @@ PrimeVul_v0.1/
 *.jsonl.gz
 
 # Results and Checkpoints
-results/
 checkpoints/
 
 # Logs

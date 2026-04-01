@@ -286,8 +286,13 @@ IMPORTANT: Be balanced in your assessment. Use the examples as reference but mak
             )}
         ]
 
-        # Make prediction
-        response, usage = self.client.chat_completion(messages)
+        # Make prediction with logprobs
+        response, usage = self.client.chat_completion(
+            messages,
+            max_tokens=10,
+            temperature=0,
+            top_logprobs=5
+        )
 
         # Parse response
         response_lower = response.strip().lower()
@@ -299,11 +304,19 @@ IMPORTANT: Be balanced in your assessment. Use the examples as reference but mak
 
         # Get confidence info if available
         confidence_score = 0.15  # Default low confidence for non-logprobs
+        top_probability = 0.5
+        second_probability = 0.35
         if isinstance(usage, tuple) and len(usage) > 1:
             logprobs_info = usage[1]
             if isinstance(logprobs_info, dict):
-                confidence_score = logprobs_info.get("confidence", 0.15)
-                top_token = logprobs_info.get("top_token", top_token)
+                confidence_score = logprobs_info.get("confidence_score", logprobs_info.get("confidence", 0.15))
+                top_probability = logprobs_info.get("top_probability", 0.5)
+                second_probability = logprobs_info.get("second_probability", 0.35)
+                # Clean and validate top_token
+                api_top_token = logprobs_info.get("top_token", "")
+                cleaned_token = api_top_token.strip().strip('"\'').lower()
+                if cleaned_token in ["yes", "no"]:
+                    top_token = cleaned_token.capitalize()
 
         # Check if should accept (according to paper: C.S. >= th2 and top-1 is Yes/No)
         should_accept = self.should_accept(confidence_score, top_token)
@@ -356,7 +369,7 @@ Example {i} ({label_str}, {ex.cwe}):
         codes: List[str],
         labels: List[int],
         indices: List[int] = None
-    ) -> Tuple[List[int], object, List[List["RAGExample"]], List[bool]]:
+    ) -> Tuple[List[int], object, List[List["RAGExample"]], List[bool], List[dict]]:
         """
         Make predictions for a batch of codes.
 
@@ -366,14 +379,16 @@ Example {i} ({label_str}, {ex.cwe}):
             indices: Indices of codes to process (None = all)
 
         Returns:
-            Tuple of (predictions, total_usage, examples_list, accepted_list)
+            Tuple of (predictions, total_usage, examples_list, accepted_list, confidence_details)
         """
         if indices is None:
             indices = range(len(codes))
 
-        predictions = [None] * len(codes)
-        examples_list = [[] for _ in range(len(codes))]
-        accepted_list = [False] * len(codes)
+        # Return results corresponding to indices, not full codes list
+        predictions = []
+        examples_list = []
+        accepted_list = []
+        confidence_details = []  # Store Stage 2 confidence
         total_usage = TokenUsage()
 
         for i, idx in enumerate(indices):
@@ -384,9 +399,26 @@ Example {i} ({label_str}, {ex.cwe}):
             label = labels[idx] if idx < len(labels) else None
 
             prediction, usage, examples, should_accept = self.predict(code, label)
-            predictions[idx] = prediction
-            examples_list[idx] = examples
-            accepted_list[idx] = should_accept
+            predictions.append(prediction)
+            examples_list.append(examples)
+            accepted_list.append(should_accept)
+
+            # Store confidence details
+            confidence_score = 0.15
+            top_token_val = "Unknown"
+            if isinstance(usage, tuple) and len(usage) > 1:
+                logprobs_info = usage[1]
+                if isinstance(logprobs_info, dict):
+                    confidence_score = logprobs_info.get("confidence_score", 0.15)
+                    top_token_val = logprobs_info.get("top_token", "Unknown")
+
+            confidence_details.append({
+                "confidence_score": confidence_score,
+                "top_token": top_token_val,
+                "prediction": prediction,
+                "accepted": should_accept
+            })
+
             # Handle both simple usage and nested (usage, logprobs_info) tuple
             if isinstance(usage, tuple):
                 actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
@@ -398,7 +430,7 @@ Example {i} ({label_str}, {ex.cwe}):
         if self.verbose:
             print(f"  Stage 2: Completed {len(indices)} samples")
 
-        return predictions, total_usage, examples_list, accepted_list
+        return predictions, total_usage, examples_list, accepted_list, confidence_details
 
     def get_name(self) -> str:
         """Get method name."""

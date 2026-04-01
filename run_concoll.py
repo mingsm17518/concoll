@@ -158,7 +158,10 @@ class ConCollFramework:
         if self.verbose:
             print("Stage 1: Direct Prediction with Confidence Scoring")
 
-        stage1_preds, stage1_accepted, stage1_usage = self.stage1.predict_batch(codes)
+        stage1_preds, stage1_accepted, stage1_usage, stage1_confidence = self.stage1.predict_batch(codes)
+
+        # Store confidence details for analysis
+        self._last_confidence = stage1_confidence
 
         # Apply Stage 1 predictions where confident (or if not forcing stages)
         for i in range(total_samples):
@@ -199,9 +202,12 @@ class ConCollFramework:
             if self.verbose:
                 print(f"\nStage 2: RAG with External Examples")
 
-            stage2_preds, stage2_usage, stage2_examples, stage2_accepted = self.stage2.predict_batch(
+            stage2_preds, stage2_usage, stage2_examples, stage2_accepted, stage2_confidence = self.stage2.predict_batch(
                 codes, labels, deferred_indices
             )
+
+            # Store Stage 2 confidence details
+            self._last_stage2_confidence = stage2_confidence
 
             # Find samples that need Stage 3 (not accepted in Stage 2)
             stage3_indices = []
@@ -245,8 +251,8 @@ class ConCollFramework:
             stage3_preds, stage3_votes, stage3_usage = self.stage3.predict_batch(
                 codes, stage3_indices, stage2_examples
             )
-            for idx in stage3_indices:
-                predictions[idx] = stage3_preds[idx]
+            for j, idx in enumerate(stage3_indices):
+                predictions[idx] = stage3_preds[j]
                 stage_stats["stage3_used"] += 1
 
             # Handle usage
@@ -275,9 +281,270 @@ class ConCollFramework:
 
         return predictions, stage_stats
 
+    def predict_batch_resume(
+        self,
+        codes: List[str],
+        labels: List[int],
+        existing_predictions: List,
+        existing_sample_status: List[dict],
+        existing_stage_stats: dict
+    ) -> tuple:
+        """
+        Resume predictions from checkpoint.
+
+        Args:
+            codes: List of source code snippets
+            labels: True labels for RAG retrieval
+            existing_predictions: Existing predictions from checkpoint
+            existing_sample_status: Status of each sample (which stage completed)
+            existing_stage_stats: Existing stage statistics
+
+        Returns:
+            Tuple of (predictions, stage_stats)
+        """
+        total_samples = len(codes)
+        predictions = existing_predictions.copy()
+        sample_status = existing_sample_status.copy()
+        stage_stats = existing_stage_stats.copy()
+        total_usage = TokenUsage()
+
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print("ConColl Sequential Framework (Resume Mode)")
+            print(f"{'='*60}")
+            print(f"Total samples: {total_samples}")
+            print(f"Resuming from checkpoint...")
+            print(f"{'='*60}\n")
+
+        # Determine which samples need to be processed at each stage
+        # stage_completed: 0=none, 1=stage1, 2=stage2, 3=stage3
+
+        # Stage 1: Need to process samples where stage_completed < 1
+        stage1_indices = [i for i in range(total_samples) if sample_status[i].get("stage_completed", 0) < 1]
+
+        if stage1_indices:
+            if self.verbose:
+                print(f"Stage 1: Processing {len(stage1_indices)} samples (resuming)...")
+
+            stage1_codes = [codes[i] for i in stage1_indices]
+            stage1_preds, stage1_accepted, stage1_usage = self.stage1.predict_batch(stage1_codes)
+
+            # Update predictions and status
+            for j, idx in enumerate(stage1_indices):
+                predictions[idx] = stage1_preds[j]
+                sample_status[idx]["stage_completed"] = 1
+                sample_status[idx]["stage1_accepted"] = stage1_accepted[j]
+                if stage1_accepted[j] and not self.force_stages:
+                    stage_stats["stage1_accepted"] += 1
+
+            total_usage += type('Usage', (), {
+                'prompt_tokens': stage1_usage.prompt_tokens,
+                'completion_tokens': stage1_usage.completion_tokens,
+                'total_tokens': stage1_usage.total_tokens,
+                'api_calls': stage1_usage.api_calls
+            })()
+            stage_stats["stage1_cost"] += stage1_usage.total_tokens
+
+            # Save checkpoint after Stage 1
+            save_checkpoint(
+                type('Config', (), {'results_dir': self.verbose and 'results'})(),
+                predictions, labels, stage_stats, sample_status, 1
+            )
+
+        # Find samples that need Stage 2
+        if self.force_stages:
+            deferred_indices = [i for i in range(total_samples)]
+        else:
+            deferred_indices = [i for i in range(total_samples)
+                              if sample_status[i].get("stage_completed", 0) < 2
+                              and predictions[i] is None]
+
+        if self.verbose:
+            print(f"\nStage 1 Summary:")
+            print(f"  Accepted: {stage_stats['stage1_accepted']}/{total_samples}")
+            print(f"  Deferred to Stage 2: {len(deferred_indices)}")
+
+        # Stage 2: RAG for deferred samples
+        stage3_indices = []
+        if deferred_indices:
+            if self.verbose:
+                print(f"\nStage 2: RAG for {len(deferred_indices)} samples (resuming)...")
+
+            stage2_codes = [codes[i] for i in deferred_indices]
+            stage2_labels = [labels[i] for i in deferred_indices]
+
+            stage2_preds, stage2_usage, stage2_examples, stage2_accepted, stage2_confidence = self.stage2.predict_batch(
+                stage2_codes, stage2_labels, list(range(len(deferred_indices)))
+            )
+
+            # Update predictions and status
+            for j, idx in enumerate(deferred_indices):
+                stage_stats["stage2_used"] += 1
+                sample_status[idx]["stage_completed"] = 2
+
+                if self.use_stage3 and self.stage3 is not None:
+                    if not stage2_accepted[j]:
+                        stage3_indices.append(idx)
+                        sample_status[idx]["stage2_accepted"] = False
+                    else:
+                        predictions[idx] = stage2_preds[j]
+                        sample_status[idx]["stage2_accepted"] = True
+                else:
+                    predictions[idx] = stage2_preds[j]
+
+            if self.verbose:
+                accepted_count = sum(stage2_accepted)
+                print(f"Stage 2: Accepted {accepted_count}/{len(deferred_indices)}, "
+                      f"Deferred {len(deferred_indices) - accepted_count} to Stage 3")
+
+            total_usage += type('Usage', (), {
+                'prompt_tokens': stage2_usage.prompt_tokens,
+                'completion_tokens': stage2_usage.completion_tokens,
+                'total_tokens': stage2_usage.total_tokens,
+                'api_calls': stage2_usage.api_calls
+            })()
+            stage_stats["stage2_cost"] += stage2_usage.total_tokens
+
+            # Save checkpoint after Stage 2
+            save_checkpoint(
+                type('Config', (), {'results_dir': 'results'})(),
+                predictions, labels, stage_stats, sample_status, 2
+            )
+
+        # Stage 3: Multi-Agent Collaboration
+        if self.use_stage3 and self.stage3 is not None and stage3_indices:
+            if self.verbose:
+                print(f"\nStage 3: Multi-Agent for {len(stage3_indices)} samples (resuming)...")
+
+            stage3_codes = [codes[i] for i in stage3_indices]
+            stage3_indices_list = list(range(len(stage3_indices)))
+
+            stage3_preds, stage3_votes, stage3_usage = self.stage3.predict_batch(
+                stage3_codes, stage3_indices_list, None  # examples not passed in resume
+            )
+
+            for j, idx in enumerate(stage3_indices):
+                predictions[idx] = stage3_preds[j]
+                stage_stats["stage3_used"] += 1
+                sample_status[idx]["stage_completed"] = 3
+
+            if hasattr(stage3_usage, 'prompt_tokens'):
+                total_usage.prompt_tokens += stage3_usage.prompt_tokens
+                total_usage.completion_tokens += stage3_usage.completion_tokens
+                total_usage.total_tokens += stage3_usage.total_tokens
+                total_usage.api_calls += stage3_usage.api_calls
+            else:
+                total_usage.api_calls += len(stage3_indices) * len(self.stage3.agents)
+
+            stage_stats["stage3_cost"] = getattr(stage3_usage, 'total_tokens', 0)
+
+            if self.verbose:
+                print(f"Stage 3 processed: {stage_stats['stage3_used']} samples")
+
+        # Final summary
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print("ConColl Framework Summary (Resume Complete)")
+            print(f"{'='*60}")
+            print(f"Stage 1 (Direct): {stage_stats['stage1_accepted']} samples")
+            print(f"Stage 2 (RAG): {stage_stats['stage2_used']} samples")
+            print(f"Stage 3 (Multi-Agent): {stage_stats['stage3_used']} samples")
+            print(f"\nTotal Tokens: {total_usage.total_tokens:,}")
+            print(f"API Calls: {total_usage.api_calls}")
+            print(f"{'='*60}\n")
+
+        return predictions, stage_stats
+
+
+def save_checkpoint(config: Config, predictions: list, labels: list,
+                    stage_stats: dict, sample_status: list, completed_stage: int,
+                    stage1_accepted: list = None, stage2_accepted: list = None):
+    """
+    Save checkpoint for resuming interrupted runs.
+
+    sample_status: list of dicts with keys:
+        - prediction: int or None
+        - stage_completed: int (0=none, 1=stage1, 2=stage2, 3=stage3)
+    """
+    import json
+    import hashlib
+
+    # Create a simple hash of labels to verify dataset consistency
+    labels_hash = hashlib.md5(str(labels).encode()).hexdigest()[:8]
+
+    checkpoint = {
+        "method": "concoll",
+        "num_samples": len(predictions),
+        "labels_hash": labels_hash,
+        "completed_stage": completed_stage,
+        "sample_status": sample_status,
+        "stage_stats": stage_stats,
+        "predictions": predictions,  # Store predictions for reference
+    }
+
+    # Store stage acceptance info if provided
+    if stage1_accepted is not None:
+        checkpoint["stage1_accepted"] = stage1_accepted
+    if stage2_accepted is not None:
+        checkpoint["stage2_accepted"] = stage2_accepted
+
+    os.makedirs(config.results_dir, exist_ok=True)
+    checkpoint_path = os.path.join(config.results_dir, "checkpoint.json")
+    with open(checkpoint_path, 'w') as f:
+        json.dump(checkpoint, f, indent=2)
+    print(f"[Checkpoint] Saved to: {checkpoint_path}")
+    return checkpoint_path
+
+
+def load_checkpoint(config: Config, num_samples: int) -> tuple:
+    """
+    Load checkpoint if exists and matches the number of samples.
+
+    Returns:
+        tuple: (predictions, sample_status, stage_stats, can_resume) or (None, None, None, False)
+    """
+    import json
+    checkpoint_path = os.path.join(config.results_dir, "checkpoint.json")
+
+    if not os.path.exists(checkpoint_path):
+        return None, None, None, False
+
+    try:
+        with open(checkpoint_path, 'r') as f:
+            checkpoint = json.load(f)
+
+        # Verify sample count matches
+        if checkpoint.get("num_samples") != num_samples:
+            print(f"[Checkpoint] Warning: Sample count mismatch ({checkpoint.get('num_samples')} vs {num_samples})")
+            print("[Checkpoint] Ignoring existing checkpoint...")
+            return None, None, None, False
+
+        predictions = checkpoint.get("predictions", [None] * num_samples)
+        sample_status = checkpoint.get("sample_status", [{"prediction": None, "stage_completed": 0}] * num_samples)
+        stage_stats = checkpoint.get("stage_stats", {
+            "stage1_accepted": 0,
+            "stage2_used": 0,
+            "stage3_used": 0,
+            "stage1_cost": 0,
+            "stage2_cost": 0,
+            "stage3_cost": 0
+        })
+        completed_stage = checkpoint.get("completed_stage", 0)
+
+        # Count completed samples
+        completed_count = sum(1 for s in sample_status if s.get("stage_completed", 0) >= 3)
+        print(f"[Checkpoint] Found checkpoint: {completed_count}/{num_samples} samples completed")
+
+        return predictions, sample_status, stage_stats, True
+
+    except Exception as e:
+        print(f"[Checkpoint] Warning: Failed to load checkpoint: {e}")
+        return None, None, None, False
+
 
 def save_intermediate_result(config: Config, predictions: list, labels: list,
-                             stage_stats: dict, completed_stage: int):
+                             stage_stats: dict, completed_stage: int,
+                             confidence_details: list = None):
     """Save intermediate results when a stage completes or error occurs."""
     import json
 
@@ -310,10 +577,26 @@ def save_intermediate_result(config: Config, predictions: list, labels: list,
         "status": "interrupted" if completed_stage < 3 else "completed"
     }
 
+    # Add confidence details if provided
+    if confidence_details:
+        result["confidence_details"] = confidence_details
+
+        # Compute confidence distribution
+        if confidence_details and len(confidence_details) > 0:
+            scores = [d.get("confidence_score", 0) for d in confidence_details if d]
+            if scores:
+                result["confidence_distribution"] = {
+                    "min": min(scores),
+                    "max": max(scores),
+                    "mean": sum(scores) / len(scores),
+                    "count": len(scores)
+                }
+
     os.makedirs(config.results_dir, exist_ok=True)
     result_path = os.path.join(config.results_dir, "concoll_results.json")
     with open(result_path, 'w') as f:
         json.dump(result, f, indent=2)
+    print(f"[Auto-saved] Intermediate result (Stage {completed_stage}): {result_path}")
     print(f"[Auto-saved] Intermediate result (Stage {completed_stage}): {result_path}")
 
 
@@ -322,7 +605,8 @@ def run_experiment(config: Config, use_test_data: bool = False,
                    stage2_threshold: float = 0.2,
                    force_stages: bool = False,
                    simulate_mode: bool = False,
-                   simulate_ratios: dict = None):
+                   simulate_ratios: dict = None,
+                   resume: bool = False):
     """Run ConColl experiment."""
     print(f"\n{'='*60}")
     print(f"ConColl Framework for Vulnerability Detection")
@@ -407,44 +691,103 @@ def run_experiment(config: Config, use_test_data: bool = False,
     # Initialize for error recovery
     predictions = None
     stage_stats = None
+    sample_status = None
 
-    # Run predictions with error handling
-    try:
-        predictions, stage_stats = framework.predict_batch(codes, labels)
-    except Exception as e:
-        print(f"\n[ERROR] {type(e).__name__}: {e}")
-        print("[INFO] Saving intermediate results...")
+    # Check for checkpoint to resume
+    if resume:
+        print(f"\n[Resume] Checking for checkpoint...")
+        predictions, sample_status, stage_stats, can_resume = load_checkpoint(config, len(codes))
 
-        # Get current state from framework
-        # predictions and stage_stats may be partially filled
-        # Use framework's internal state if available
-        if hasattr(framework, '_last_predictions'):
-            predictions = framework._last_predictions
-        if hasattr(framework, '_last_stage_stats'):
-            stage_stats = framework._last_stage_stats
+        if can_resume and predictions is not None:
+            print(f"[Resume] Found valid checkpoint!")
+            print(f"[Resume] Will continue from where it left off...")
 
-        if predictions is None:
-            print("[WARNING] No predictions available to save")
+            # Run predictions with resume mode
+            try:
+                predictions, stage_stats = framework.predict_batch_resume(
+                    codes, labels, predictions, sample_status, stage_stats
+                )
+            except Exception as e:
+                print(f"\n[ERROR] {type(e).__name__}: {e}")
+                print("[INFO] Saving intermediate results...")
+                if hasattr(framework, '_last_predictions'):
+                    predictions = framework._last_predictions
+                if hasattr(framework, '_last_stage_stats'):
+                    stage_stats = framework._last_stage_stats
+                if predictions is not None:
+                    valid_indices = [i for i, p in enumerate(predictions) if p is not None]
+                    valid_preds = [predictions[i] for i in valid_indices]
+                    valid_labels = [labels[i] for i in valid_indices]
+                    if len(valid_preds) > 0:
+                        save_intermediate_result(config, predictions, labels,
+                                               stage_stats if stage_stats else
+                                               {"stage1_accepted": 0, "stage2_used": 0, "stage3_used": 0,
+                                                "stage1_cost": 0, "stage2_cost": 0, "stage3_cost": 0}, 3)
+                        binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
+                        print(f"[INFO] Saved results for {len(valid_preds)}/{len(predictions)} samples")
+                raise
         else:
-            # Try to compute metrics with available predictions
-            valid_indices = [i for i, p in enumerate(predictions) if p is not None]
-            valid_preds = [predictions[i] for i in valid_indices]
-            valid_labels = [labels[i] for i in valid_indices]
+            print("[Resume] No valid checkpoint found, starting fresh...")
+            # Run normally
+            try:
+                predictions, stage_stats = framework.predict_batch(codes, labels)
+            except Exception as e:
+                print(f"\n[ERROR] {type(e).__name__}: {e}")
+                print("[INFO] Saving intermediate results...")
+                if hasattr(framework, '_last_predictions'):
+                    predictions = framework._last_predictions
+                if hasattr(framework, '_last_stage_stats'):
+                    stage_stats = framework._last_stage_stats
+                if predictions is not None:
+                    valid_indices = [i for i, p in enumerate(predictions) if p is not None]
+                    valid_preds = [predictions[i] for i in valid_indices]
+                    valid_labels = [labels[i] for i in valid_indices]
+                    if len(valid_preds) > 0:
+                        save_intermediate_result(config, predictions, labels,
+                                               stage_stats if stage_stats else
+                                               {"stage1_accepted": 0, "stage2_used": 0, "stage3_used": 0,
+                                                "stage1_cost": 0, "stage2_cost": 0, "stage3_cost": 0}, 3)
+                        binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
+                        print(f"[INFO] Saved results for {len(valid_preds)}/{len(predictions)} samples")
+                raise
+    else:
+        # Run predictions with error handling
+        try:
+            predictions, stage_stats = framework.predict_batch(codes, labels)
+        except Exception as e:
+            print(f"\n[ERROR] {type(e).__name__}: {e}")
+            print("[INFO] Saving intermediate results...")
 
-            if len(valid_preds) > 0:
-                save_intermediate_result(config, predictions, labels,
-                                       stage_stats if stage_stats else
-                                       {"stage1_accepted": 0, "stage2_used": 0, "stage3_used": 0,
-                                        "stage1_cost": 0, "stage2_cost": 0, "stage3_cost": 0},
-                                       3)  # Assume Stage 3 was running
-                binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
-                print(f"[INFO] Saved results for {len(valid_preds)}/{len(predictions)} samples")
-                print(f"[INFO] Accuracy so far: {binary_metrics.accuracy:.4f}")
+            # Get current state from framework
+            # predictions and stage_stats may be partially filled
+            # Use framework's internal state if available
+            if hasattr(framework, '_last_predictions'):
+                predictions = framework._last_predictions
+            if hasattr(framework, '_last_stage_stats'):
+                stage_stats = framework._last_stage_stats
+
+            if predictions is None:
+                print("[WARNING] No predictions available to save")
             else:
-                print("[WARNING] No valid predictions to save")
+                # Try to compute metrics with available predictions
+                valid_indices = [i for i, p in enumerate(predictions) if p is not None]
+                valid_preds = [predictions[i] for i in valid_indices]
+                valid_labels = [labels[i] for i in valid_indices]
 
-        # Re-raise to halt execution
-        raise
+                if len(valid_preds) > 0:
+                    save_intermediate_result(config, predictions, labels,
+                                           stage_stats if stage_stats else
+                                           {"stage1_accepted": 0, "stage2_used": 0, "stage3_used": 0,
+                                            "stage1_cost": 0, "stage2_cost": 0, "stage3_cost": 0},
+                                           3)  # Assume Stage 3 was running
+                    binary_metrics = compute_binary_metrics(valid_preds, valid_labels)
+                    print(f"[INFO] Saved results for {len(valid_preds)}/{len(predictions)} samples")
+                    print(f"[INFO] Accuracy so far: {binary_metrics.accuracy:.4f}")
+                else:
+                    print("[WARNING] No valid predictions to save")
+
+            # Re-raise to halt execution
+            raise
 
     # Compute metrics
     binary_metrics = compute_binary_metrics(predictions, labels)
@@ -468,6 +811,14 @@ def run_experiment(config: Config, use_test_data: bool = False,
     # Note: Token usage tracking needs to be accumulated across stages
     # This is a simplified version
 
+    # Get confidence details if available
+    confidence_details = None
+    stage2_confidence_details = None
+    if hasattr(framework, '_last_confidence'):
+        confidence_details = framework._last_confidence
+    if hasattr(framework, '_last_stage2_confidence'):
+        stage2_confidence_details = framework._last_stage2_confidence
+
     # Create result
     result = {
         "method": "concoll",
@@ -482,8 +833,35 @@ def run_experiment(config: Config, use_test_data: bool = False,
             "fp": int(binary_metrics.fp),
             "tn": int(binary_metrics.tn),
             "fn": int(binary_metrics.fn)
-        }
+        },
+        "predictions": predictions,  # Save predictions for pair-wise analysis
+        "labels": labels  # Save labels for pair-wise analysis
     }
+
+    # Add Stage 1 confidence details if available
+    if confidence_details:
+        result["confidence_details"] = confidence_details
+        # Compute confidence distribution
+        scores = [d.get("confidence_score", 0) for d in confidence_details if d and d.get("confidence_score") is not None]
+        if scores:
+            result["confidence_distribution"] = {
+                "min": min(scores),
+                "max": max(scores),
+                "mean": sum(scores) / len(scores),
+                "count": len(scores)
+            }
+
+    # Add Stage 2 confidence details if available
+    if stage2_confidence_details:
+        result["stage2_confidence_details"] = stage2_confidence_details
+        s2_scores = [d.get("confidence_score", 0) for d in stage2_confidence_details if d and d.get("confidence_score") is not None]
+        if s2_scores:
+            result["stage2_confidence_distribution"] = {
+                "min": min(s2_scores),
+                "max": max(s2_scores),
+                "mean": sum(s2_scores) / len(s2_scores),
+                "count": len(s2_scores)
+            }
 
     # Save result
     os.makedirs(config.results_dir, exist_ok=True)
@@ -533,6 +911,8 @@ def main():
                         help="Ratio of samples for Stage 2 in simulate mode (default: 0.25)")
     parser.add_argument("--stage3-ratio", type=float, default=0.05,
                         help="Ratio of samples for Stage 3 in simulate mode (default: 0.05)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from checkpoint if exists")
     args = parser.parse_args()
 
     # Create config first to get default values
@@ -563,7 +943,8 @@ def main():
         args.stage2_threshold,
         args.force_stages,
         args.simulate,
-        simulate_ratios
+        simulate_ratios,
+        args.resume
     )
 
 

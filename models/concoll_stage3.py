@@ -169,8 +169,9 @@ class MultiAgentCollaboration:
         if indices is None:
             indices = range(len(codes))
 
-        predictions = [None] * len(codes)
-        all_agent_votes = {agent: [None] * len(codes) for agent in self.agents}
+        # Return results corresponding to indices, not full codes list
+        predictions = []
+        all_agent_votes = {agent: [] for agent in self.agents}
         total_usage = TokenUsage()
 
         for i, idx in enumerate(indices):
@@ -185,7 +186,7 @@ class MultiAgentCollaboration:
             examples = examples_list[idx] if examples_list and idx < len(examples_list) else None
             vote, agent_votes, usage = self.predict(code, examples)
 
-            predictions[idx] = vote
+            predictions.append(vote)
             # Handle both simple usage and nested (usage, logprobs_info) tuple
             if isinstance(usage, tuple):
                 actual_usage = usage[0] if hasattr(usage[0], 'prompt_tokens') else usage
@@ -195,7 +196,7 @@ class MultiAgentCollaboration:
                 total_usage += actual_usage
 
             for agent, agent_vote in agent_votes.items():
-                all_agent_votes[agent][idx] = agent_vote
+                all_agent_votes[agent].append(agent_vote)
 
         if self.verbose:
             print(f"  Stage 3: Completed {len(indices)} samples")
