@@ -1,0 +1,22 @@
+{
+  "method": "streamed",
+  "num_samples": 3,
+  "num_candidates": 5,
+  "binary_metrics": {
+    "accuracy": 0.6666666666666666,
+    "precision": 0.6666666666666666,
+    "recall": 1.0,
+    "f1": 0.8,
+    "tp": 2,
+    "fp": 1,
+    "tn": 0,
+    "fn": 0
+  },
+  "cost_metrics": {
+    "total_prompt_tokens": 4848,
+    "total_completion_tokens": 3415,
+    "total_tokens": 8263,
+    "total_api_calls": 15,
+    "estimated_cost_usd": 0.04627
+  }
+}

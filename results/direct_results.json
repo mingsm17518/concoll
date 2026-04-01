@@ -1,0 +1,22 @@
+{
+  "method": "direct",
+  "num_samples": 10,
+  "num_candidates": 1,
+  "binary_metrics": {
+    "accuracy": 0.5,
+    "precision": 0.5,
+    "recall": 1.0,
+    "f1": 0.6666666666666666,
+    "tp": 5,
+    "fp": 5,
+    "tn": 0,
+    "fn": 0
+  },
+  "cost_metrics": {
+    "total_prompt_tokens": 5696,
+    "total_completion_tokens": 6784,
+    "total_tokens": 12480,
+    "total_api_calls": 10,
+    "estimated_cost_usd": 0.08208
+  }
+}
